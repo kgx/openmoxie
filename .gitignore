@@ -1,1 +1,9 @@
+# Local Python artifacts
 **/__pycache__/
+
+# IDE config and metadata
+*.iml
+
+# Only preserve folder structure
+local/work/**/*
+!local/work/.gitkeep
