@@ -1,0 +1,45 @@
+# Version control
+.git
+.gitignore
+
+# Local development and volumes
+local/
+unversioned/
+
+# Python potential artifacts (if relevant)
+__pycache__/
+*.py[cod]
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+eggs/
+*.egg-info/
+
+# Deployment scripts (these should run outside container)
+deploy.bat
+deploy.sh
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Docker files (typically don't need these inside container)
+Dockerfile
+mqtt.Dockerfile
+docker-compose.yml
+.dockerignore
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db

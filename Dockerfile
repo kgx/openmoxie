@@ -2,21 +2,24 @@
 # Use an official Python base image
 FROM python:3.10-slim
 
-# Set the working directory in the container
-WORKDIR /app
-
-# Copy the current directory contents into the container at /app
-COPY . /app
-
 # PIP for installing python dep
 RUN apt-get update && apt-get install -y \
     python3-pip \
     python3-dev \
     libsndfile1
 
-# Install Python dependencies
+# Set the working directory in the container
+WORKDIR /app
+
+# First add requirements
+COPY requirements.txt /app
+
+# Then install Python dependencies
 RUN pip install --upgrade pip
 RUN pip install -r requirements.txt
+
+# Copy remaining directory contents into the container at /app
+COPY . /app
 
 # Create a volume for persistent data
 VOLUME /app/site/work
