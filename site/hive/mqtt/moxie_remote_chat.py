@@ -291,6 +291,15 @@ class RemoteChat:
         resp['response_actions'] = [ action ]
         resp['response_action'] = action
 
+    # Create launch to the next thing (better) or an exit (not as good)
+    def add_launch_or_exit(self, rcr, resp):
+        if 'recommend' in rcr and 'exits' in rcr['recommend'] and len(rcr['recommend']['exits']) > 0:
+            self.add_response_action(resp, 'launch',
+                                     module_id=rcr['recommend']['exits'][0].get('module_id'),
+                                     content_id=rcr['recommend']['exits'][0].get('content_id'))
+        else:
+            self.add_response_action(resp, 'exit_module')
+
     # Get the next response to a chat
     def next_session_response(self, device_id, sess, rcr, resp):
         speech = rcr["speech"]
@@ -298,9 +307,19 @@ class RemoteChat:
         resp['output']['text'] = text
         resp['output']['markup'] = self.make_markup(text)
         if overflow:
-            self.add_response_action(resp, 'exit_module')
+            self.add_launch_or_exit(rcr, resp)
         self._server.send_command_to_bot_json(device_id, 'remote_chat', resp)
     
+    # Get the first prompt for a chat
+    def first_session_response(self, device_id, sess, rcr, resp):
+        text = sess.get_prompt()
+        resp['output']['text'] = text
+        resp['output']['markup'] = self.make_markup(text)
+        # Special for prompt-only one-line modules, exit on prompt if max_len=0
+        if sess.overflow():
+            self.add_launch_or_exit(rcr, resp)
+        self._server.send_command_to_bot_json(device_id, 'remote_chat', resp)
+
     # Entry point where all RemoteChatRequests arrive
     def handle_request(self, device_id, rcr):
         id = rcr.get('module_id', '') + '/' + rcr.get('content_id', '')
@@ -318,12 +337,7 @@ class RemoteChat:
             if cmd == 'notify':
                 sess.ingest_notify(rcr)
             elif cmd == "prompt":
-                resp = self.make_response(rcr)
-                resp['output']['markup'] = sess.get_prompt()
-                # Special for prompt-only one-line modules, exit on prompt if max_len=0
-                if sess.overflow():
-                    self.add_response_action(resp, 'exit_module')
-                self._server.send_command_to_bot_json(device_id, 'remote_chat', resp)
+                self._worker_queue.submit(self.first_session_response, device_id, sess, rcr, self.make_response(rcr))
             else:
                 self._worker_queue.submit(self.next_session_response, device_id, sess, rcr, self.make_response(rcr))
         else:
