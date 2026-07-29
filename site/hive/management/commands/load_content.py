@@ -20,6 +20,12 @@ class Command(BaseCommand):
         parser.add_argument('files', nargs='+', help="content pack paths, or '-' to read from stdin")
 
     def handle(self, *args, **options):
+        # command runs in its own process; set the OpenAI key so fragment seeding can embed
+        from ...models import HiveConfiguration
+        from ...mqtt.ai_factory import set_openai_key
+        cfg = HiveConfiguration.objects.filter(name='default').first()
+        if cfg and cfg.openai_api_key:
+            set_openai_key(cfg.openai_api_key)
         for path in options['files']:
             if path == '-':
                 data = json.load(sys.stdin)
