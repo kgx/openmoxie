@@ -6,7 +6,9 @@ import numpy
 from django.core.management import CommandError, call_command
 from django.test import TestCase
 
-from .models import ChatTranscript, MoxieDevice, MoxieSchedule, PersistentData, SinglePromptChat
+from .memory import apply_memory_ops, assemble_memory
+from .models import (ChatTranscript, MemoryFragment, MoxieDevice, MoxieSchedule,
+                     PersistentData, SinglePromptChat)
 from .mqtt.conversations import ChatSession, inference_token_params
 from .mqtt.robot_data import RobotData
 from .mqtt.scheduler import distribute_elements, expand_schedule, ransac_select
@@ -211,6 +213,62 @@ class TranscriptTests(TestCase):
         rc.save_transcript('d_test', {'speech': 'animation:happy', 'extra_lines': []})
         rc.save_transcript('d_ghost', {'speech': 'hello', 'extra_lines': []})
         self.assertEqual(ChatTranscript.objects.count(), 0)
+
+
+class MemoryFragmentTests(TestCase):
+    def setUp(self):
+        self.device = MoxieDevice.objects.create(device_id='d_mem')
+
+    def test_ops_add_update_retire_restore(self):
+        r = apply_memory_ops('d_mem', [
+            {'op': 'add', 'bank': 'magic_tricks', 'key': 'trick:French-Drop',
+             'text': 'Learning the French Drop', 'confidence': 0.9},
+            {'op': 'add', 'bank': 'people', 'key': 'friend:sam', 'text': 'Best friend Sam'},
+        ])
+        self.assertEqual(r, {'applied': 2, 'skipped': 0})
+        # keys are casefolded so extractor casing wobble cannot duplicate fragments
+        apply_memory_ops('d_mem', [{'op': 'update', 'bank': 'magic_tricks',
+                                    'key': 'trick:french-drop', 'text': 'Mastered the French Drop'}])
+        frag = MemoryFragment.objects.get(device=self.device, bank='magic_tricks')
+        self.assertEqual(frag.text, 'Mastered the French Drop')
+        self.assertEqual(frag.times_seen, 2)
+        apply_memory_ops('d_mem', [{'op': 'retire', 'bank': 'people', 'key': 'friend:sam'}])
+        self.assertFalse(MemoryFragment.objects.get(bank='people').active)
+        apply_memory_ops('d_mem', [{'op': 'restore', 'bank': 'people', 'key': 'friend:sam'}])
+        self.assertTrue(MemoryFragment.objects.get(bank='people').active)
+
+    def test_invalid_ops_are_skipped_not_fatal(self):
+        r = apply_memory_ops('d_mem', [
+            {'op': 'explode', 'bank': 'x', 'key': 'y', 'text': 'z'},
+            {'op': 'add', 'bank': 'x', 'key': 'y'},           # missing text
+            'not even a dict',
+            {'op': 'retire', 'bank': 'x', 'key': 'never-existed'},
+            {'op': 'add', 'bank': 'ok', 'key': 'k', 'text': 'kept', 'confidence': 'bogus'},
+        ])
+        self.assertEqual(r, {'applied': 1, 'skipped': 4})
+        self.assertEqual(MemoryFragment.objects.get(bank='ok').confidence, 0.5)
+        self.assertEqual(apply_memory_ops('d_ghost', [{'op': 'add', 'bank': 'a', 'key': 'b',
+                                                       'text': 'c'}]),
+                         {'error': 'unknown device d_ghost'})
+
+    def test_assemble_core_relevance_and_budget(self):
+        apply_memory_ops('d_mem', [
+            {'op': 'add', 'bank': 'profile', 'key': 'summary', 'text': 'George, age 7, aspiring magician'},
+            {'op': 'add', 'bank': 'places', 'key': 'ruby-falls', 'text': 'Visited Ruby Falls waterfall'},
+            {'op': 'add', 'bank': 'people', 'key': 'friend:sam', 'text': 'Best friend Sam plays soccer'},
+            {'op': 'add', 'bank': 'running_jokes', 'key': 'joke', 'text': 'Retired joke about socks'},
+        ])
+        apply_memory_ops('d_mem', [{'op': 'retire', 'bank': 'running_jokes', 'key': 'joke'}])
+        ctx = assemble_memory('d_mem', utterance='remember the waterfall at ruby falls?')
+        self.assertIn('George, age 7', ctx)          # core bank always present
+        self.assertIn('Ruby Falls', ctx)             # relevant fragment selected
+        self.assertNotIn('socks', ctx)               # retired fragments excluded
+        self.assertIn('PROFILE:', ctx)
+        # tight budget: core survives, non-core is squeezed out
+        tight = assemble_memory('d_mem', utterance='', budget_chars=10)
+        self.assertIn('George, age 7', tight)
+        self.assertNotIn('Sam', tight)
+        self.assertEqual(assemble_memory('d_ghost'), '')
 
 
 class InitDataTests(TestCase):

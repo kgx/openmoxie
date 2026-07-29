@@ -135,6 +135,26 @@ class PersistentData(models.Model):
     def __str__(self):
         return f'{self.device} - Data'
 
+class MemoryFragment(models.Model):
+    device = models.ForeignKey(MoxieDevice, on_delete=models.CASCADE)
+    bank = models.CharField(max_length=40)     # profile | magic_tricks | people | places | goals | running_jokes | episodes ...
+    key = models.CharField(max_length=120)     # stable identifier within the bank, e.g. 'trick:french-drop'
+    text = models.TextField()
+    confidence = models.FloatField(default=0.5)
+    times_seen = models.IntegerField(default=1)
+    active = models.BooleanField(default=True) # retired fragments are flagged, never deleted
+    created = models.DateTimeField(auto_now_add=True)
+    updated = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ('device', 'bank', 'key')
+        indexes = [
+            models.Index(fields=["device", "bank", "active"], name="fragment_device_bank_idx"),
+        ]
+
+    def __str__(self):
+        return f'{self.bank}/{self.key}: {self.text[:50]}'
+
 class ChatTranscript(models.Model):
     device = models.ForeignKey(MoxieDevice, on_delete=models.CASCADE)
     timestamp = models.DateTimeField(auto_now_add=True)
