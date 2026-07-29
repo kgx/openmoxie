@@ -33,7 +33,9 @@ class ChatSession:
         self._local_data = {}
 
     def add_history(self, role, message, history=None):
-        if not history:
+        # only count volleys against the session history; an empty passed-in clone must not
+        # redirect writes to self._history
+        if history is None:
             history = self._history
             self._total_volleys += 1
         if history and history[-1].get("role") == role:
@@ -42,7 +44,8 @@ class ChatSession:
         else:
             history.append({ "role": role, "content": message })
             if len(history) > self._max_history:
-                history = history[-self._max_history:]
+                # trim in place - rebinding the local would leave the real list unbounded
+                del history[0:len(history) - self._max_history]
 
     def is_empty(self):
         return len(self._history) == 0
@@ -89,7 +92,7 @@ class ChatSession:
     def has_complete_hook(self):
         return False
     
-    def complete_hook(self, device_id, volley:Volley):
+    def complete_hook(self, volley:Volley):
         pass
 
 '''
