@@ -344,6 +344,118 @@ class LoadContentFragmentTests(TestCase):
             call_command('load_content', f2.name)
 
 
+class DreamTests(TestCase):
+    def setUp(self):
+        import datetime as dt
+
+        from django.utils import timezone as djtz
+
+        from . import dream as dream_mod
+        self.dream = dream_mod
+        MoxieDevice.objects.create(device_id='d_mem')
+        self._orig_embed = memory_mod._embed_texts
+        memory_mod._embed_texts = lambda texts: [[1.0, 0.0] for _ in texts]
+        apply_memory_ops('d_mem', [
+            {'op': 'add', 'bank': 'other', 'key': 'stale', 'text': 'An old trivial fact', 'confidence': 0.6},
+            {'op': 'add', 'bank': 'other', 'key': 'dupe-a', 'text': 'Loves magic shows', 'confidence': 0.7},
+            {'op': 'add', 'bank': 'other', 'key': 'dupe-b', 'text': 'Really likes magic shows', 'confidence': 0.7},
+            {'op': 'add', 'bank': 'profile', 'key': 'summary', 'text': 'George the magician', 'confidence': 1.0},
+        ])
+        old = djtz.now() - dt.timedelta(days=90)
+        MemoryFragment.objects.filter(key__in=['stale', 'profile']).update(updated=old)
+        MemoryFragment.objects.filter(key='stale').update(updated=old)
+
+    def tearDown(self):
+        memory_mod._embed_texts = self._orig_embed
+
+    def test_decay_hits_stale_noncore_only(self):
+        import datetime as dt
+
+        from django.utils import timezone as djtz
+        MemoryFragment.objects.filter(key='summary').update(
+            updated=djtz.now() - dt.timedelta(days=90))
+        decayed = self.dream._decay_atomic('d_mem')
+        self.assertEqual(decayed, 1)  # only 'stale'; dupes are fresh, profile is core
+        self.assertAlmostEqual(MemoryFragment.objects.get(key='stale').confidence, 0.45)
+        self.assertEqual(MemoryFragment.objects.get(key='summary').confidence, 1.0)
+
+    def test_duplicate_pairs_by_embedding(self):
+        frags = list(MemoryFragment.objects.filter(device__device_id='d_mem', active=True))
+        pairs = self.dream.duplicate_pairs(frags)
+        self.assertTrue(any('dupe-a' in a + b and 'dupe-b' in a + b for a, b in pairs))
+
+    def test_run_dream_applies_llm_ops(self):
+        self._orig_llm = self.dream._dream_llm
+        self.dream._dream_llm = lambda prompt: json.dumps([
+            {'op': 'update', 'bank': 'other', 'key': 'dupe-a',
+             'text': 'Loves magic shows', 'confidence': 0.8},
+            {'op': 'retire', 'bank': 'other', 'key': 'dupe-b'}])
+        try:
+            r = self.dream.run_dream('d_mem')
+        finally:
+            self.dream._dream_llm = self._orig_llm
+        self.assertEqual(r['applied'], 2)
+        self.assertGreaterEqual(r['dup_candidates'], 1)
+        self.assertFalse(MemoryFragment.objects.get(key='dupe-b').active)
+
+    def test_run_dream_unparseable_is_safe(self):
+        self._orig_llm = self.dream._dream_llm
+        self.dream._dream_llm = lambda prompt: 'I refuse to emit JSON'
+        try:
+            r = self.dream.run_dream('d_mem')
+        finally:
+            self.dream._dream_llm = self._orig_llm
+        self.assertIn('error', r)
+        self.assertEqual(MemoryFragment.objects.filter(active=True).count(), 4)
+
+    def test_backup_creates_and_prunes(self):
+        import os
+        import sqlite3 as sq
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        src = os.path.join(tmp, 'src.sqlite3')
+        sq.connect(src).execute('CREATE TABLE t (x)').connection.commit()
+        backups = os.path.join(tmp, 'backups')
+        os.makedirs(backups)
+        for i in range(20):
+            open(os.path.join(backups, f'db-2020-01-{i+1:02d}.sqlite3'), 'w').close()
+        dest = self.dream.backup_database(src_path=src, dest_dir=backups)
+        self.assertTrue(os.path.exists(dest))
+        remaining = [f for f in os.listdir(backups) if f.startswith('db-')]
+        self.assertEqual(len(remaining), self.dream.BACKUP_KEEP)
+
+    def test_nightly_tick_gates_on_hour_day_and_activity(self):
+        import datetime as dt
+        import os
+        import time
+
+        from django.conf import settings
+        marker = os.path.join(settings.DATA_STORE_DIR, self.dream._MARKER_FILE)
+        if os.path.exists(marker):
+            os.remove(marker)
+        fired = []
+        self._orig_safe = self.dream._safe_maintenance
+        self.dream._safe_maintenance = lambda only_devices=None: fired.append(only_devices)
+        try:
+            wrong_hour = dt.datetime(2026, 7, 30, self.dream.DREAM_HOUR + 1, 0)
+            self.assertFalse(self.dream.nightly_tick(wrong_hour))
+            # right hour but zero conversation activity -> skip (and no maintenance)
+            right = dt.datetime(2026, 7, 30, self.dream.DREAM_HOUR, 5)
+            self.assertFalse(self.dream.nightly_tick(right))
+            # next night, with activity -> fires for the active device only
+            ChatTranscript.objects.create(device=MoxieDevice.objects.get(device_id='d_mem'),
+                                          role='user', text='hi moxie')
+            night2 = dt.datetime(2026, 7, 31, self.dream.DREAM_HOUR, 5)
+            self.assertTrue(self.dream.nightly_tick(night2))
+            self.assertFalse(self.dream.nightly_tick(night2), 'must not fire twice same day')
+            time.sleep(0.3)
+            self.assertEqual(fired, [['d_mem']])
+        finally:
+            self.dream._safe_maintenance = self._orig_safe
+            if os.path.exists(marker):
+                os.remove(marker)
+
+
 class InitDataTests(TestCase):
     def test_factory_data_loads_and_preserves_local_edits(self):
         call_command('init_data')

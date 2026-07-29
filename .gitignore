@@ -7,3 +7,4 @@
 # Only preserve folder structure
 local/work/**/*
 !local/work/.gitkeep
+site/work/

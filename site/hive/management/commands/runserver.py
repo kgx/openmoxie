@@ -21,6 +21,11 @@ class Command(RunserverCommand):
         from hive.mqtt.moxie_server import create_service_instance
         ep = settings.MQTT_ENDPOINT
         instance = create_service_instance(project_id=ep['project'], host=ep['host'], port=ep['port'], cert_required=ep.get('cert_required', True))
+        from hive.dream import nightly_tick
         while self._run_enabled:
             sleep(60)
             instance.print_metrics()
+            try:
+                nightly_tick()
+            except Exception as e:
+                print(f'nightly tick failed: {e}')
