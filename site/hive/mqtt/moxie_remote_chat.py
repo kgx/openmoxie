@@ -87,7 +87,15 @@ class RemoteChat:
         if session.has_complete_hook():
             # make a data-only Volley for the completion hook
             volley = Volley({}, device_id=device_id, data_only=True, robot_data=self._server.robot_data().get_volley_data(device_id), local_data=session.local_data)
-            self._worker_queue.submit(session.complete_hook, volley)
+            self._worker_queue.submit(self.run_complete_hook, device_id, session, volley)
+
+    # Run a session completion hook, then flush any persistent data it wrote so it survives
+    # a server restart before the robot disconnects
+    def run_complete_hook(self, device_id, session:ChatSession, volley:Volley):
+        try:
+            session.complete_hook(volley)
+        finally:
+            self._server.robot_data().save_persist(device_id)
 
     # Get the current or a new session for this device for this module/content ID pair
     def active_session_data(self, device_id):

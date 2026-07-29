@@ -151,6 +151,13 @@ class RobotData:
         if pdata:
             pdata.save()
 
+    # Flush a connected robot's persistent data to the database.  Data is normally saved only on
+    # disconnect; calling this at session boundaries protects it from server restarts/crashes.
+    def save_persist(self, robot_id):
+        pdata = self._robot_map.get(robot_id, {}).get("persistent_data")
+        if pdata:
+            run_db_atomic(pdata.save)
+
     # Get persist record, cached or from db
     def get_persist_for_device(self, device:MoxieDevice):
         if device.device_id in self._robot_map:
