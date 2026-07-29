@@ -11,7 +11,8 @@ history of the conversation and provides mostly seemless conversation context fo
 even when the user provides input in multiple speech windows before hearing a response.
 '''
 import concurrent.futures
-from ..models import SinglePromptChat
+from ..models import SinglePromptChat, MoxieDevice, ChatTranscript
+from .util import run_db_atomic
 from ..automarkup import process as automarkup_process
 from ..automarkup import initialize_rules as automarkup_initialize_rules
 import logging
@@ -24,6 +25,7 @@ from .volley import Volley
 _ENABLE_GLOBAL_COMMANDS = True
 _LOG_ALL_RCR = False
 _LOG_NOTIFY_RCR = True
+_PERSIST_TRANSCRIPTS = True
 _MAX_WORKER_THREADS = 5
 
 logger = logging.getLogger(__name__)
@@ -167,6 +169,29 @@ class RemoteChat:
         if moxie_speech:
             logger.info(f"-- MOXIE: {moxie_speech} [{rcr.get('module_id')}/{rcr.get('content_id')}]")
 
+    # Persist the spoken lines from a notify record as transcript rows (runs on worker pool)
+    def save_transcript(self, device_id, rcr):
+        try:
+            lines = []
+            for el in rcr.get('extra_lines', []):
+                if el.get('context_type') == 'input' and el.get('text'):
+                    lines.append(('user', el['text']))
+            speech = rcr.get('speech')
+            if speech and 'animation:' not in speech and 'silent:' not in speech:
+                lines.append(('moxie', speech))
+            if lines:
+                run_db_atomic(self.write_transcript_rows, device_id,
+                              rcr.get('module_id', ''), rcr.get('content_id', ''), lines)
+        except Exception as e:
+            logger.warning(f'Failed to persist transcript: {e}')
+
+    def write_transcript_rows(self, device_id, module_id, content_id, lines):
+        device = MoxieDevice.objects.filter(device_id=device_id).first()
+        if device:
+            for role, text in lines:
+                ChatTranscript.objects.create(device=device, module_id=module_id,
+                                              content_id=content_id, role=role, text=text)
+
     # Entry point where all RemoteChatRequests arrive
     def handle_request(self, device_id, rcr, volley_data):
         if _LOG_ALL_RCR:
@@ -175,6 +200,9 @@ class RemoteChat:
         cmd = rcr.get('command')
         if _LOG_NOTIFY_RCR and cmd == 'notify':
             self.log_notify(rcr)
+        if _PERSIST_TRANSCRIPTS and cmd == 'notify':
+            # notify carries what was actually spoken (either side), the ground truth transcript
+            self._worker_queue.submit(self.save_transcript, device_id, rcr)
 
         maker = self._modules.get(id)
         if maker:

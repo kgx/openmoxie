@@ -6,7 +6,7 @@ import numpy
 from django.core.management import CommandError, call_command
 from django.test import TestCase
 
-from .models import MoxieDevice, MoxieSchedule, PersistentData, SinglePromptChat
+from .models import ChatTranscript, MoxieDevice, MoxieSchedule, PersistentData, SinglePromptChat
 from .mqtt.conversations import ChatSession, inference_token_params
 from .mqtt.robot_data import RobotData
 from .mqtt.scheduler import distribute_elements, expand_schedule, ransac_select
@@ -183,6 +183,34 @@ class LoadContentTests(TestCase):
         pack = {'persist': [{'device_id': 'd_ghost', 'data': {}}]}
         with self.assertRaises(CommandError):
             call_command('load_content', self.write_pack(pack))
+
+
+class TranscriptTests(TestCase):
+    def test_notify_lines_persisted_with_roles(self):
+        from types import SimpleNamespace
+        from .mqtt.moxie_remote_chat import RemoteChat
+        MoxieDevice.objects.create(device_id='d_test')
+        rc = RemoteChat(SimpleNamespace())
+        rcr = {'module_id': 'OPENMOXIE_CHAT', 'content_id': 'memory2',
+               'speech': 'That is a great trick, George!',
+               'extra_lines': [{'context_type': 'input', 'text': 'I learned a new trick'},
+                               {'context_type': 'output', 'text': 'not an input line'}]}
+        rc.save_transcript('d_test', rcr)
+        rows = list(ChatTranscript.objects.order_by('id'))
+        self.assertEqual([(r.role, r.text) for r in rows],
+                         [('user', 'I learned a new trick'),
+                          ('moxie', 'That is a great trick, George!')])
+        self.assertEqual(rows[0].module_id, 'OPENMOXIE_CHAT')
+        self.assertEqual(rows[0].content_id, 'memory2')
+
+    def test_animation_speech_and_unknown_device_skipped(self):
+        from types import SimpleNamespace
+        from .mqtt.moxie_remote_chat import RemoteChat
+        MoxieDevice.objects.create(device_id='d_test')
+        rc = RemoteChat(SimpleNamespace())
+        rc.save_transcript('d_test', {'speech': 'animation:happy', 'extra_lines': []})
+        rc.save_transcript('d_ghost', {'speech': 'hello', 'extra_lines': []})
+        self.assertEqual(ChatTranscript.objects.count(), 0)
 
 
 class InitDataTests(TestCase):

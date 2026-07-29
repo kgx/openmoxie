@@ -134,3 +134,19 @@ class PersistentData(models.Model):
 
     def __str__(self):
         return f'{self.device} - Data'
+
+class ChatTranscript(models.Model):
+    device = models.ForeignKey(MoxieDevice, on_delete=models.CASCADE)
+    timestamp = models.DateTimeField(auto_now_add=True)
+    module_id = models.CharField(max_length=200, blank=True, default='')
+    content_id = models.CharField(max_length=200, blank=True, default='')
+    role = models.CharField(max_length=20)  # 'user' or 'moxie'
+    text = models.TextField()
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["device", "timestamp"], name="transcript_device_ts_idx"),
+        ]
+
+    def __str__(self):
+        return f'{self.timestamp} {self.role}: {self.text[:60]}'
