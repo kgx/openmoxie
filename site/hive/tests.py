@@ -1,7 +1,9 @@
+import json
 import random
+import tempfile
 
 import numpy
-from django.core.management import call_command
+from django.core.management import CommandError, call_command
 from django.test import TestCase
 
 from .models import MoxieDevice, MoxieSchedule, PersistentData, SinglePromptChat
@@ -129,6 +131,58 @@ class PersistentDataFlushTests(TestCase):
 
     def test_save_persist_ignores_unknown_device(self):
         RobotData().save_persist('d_never_connected')
+
+
+class LoadContentTests(TestCase):
+    def write_pack(self, pack):
+        f = tempfile.NamedTemporaryFile('w', suffix='.json', delete=False)
+        json.dump(pack, f)
+        f.close()
+        return f.name
+
+    def test_loads_conversations_and_is_idempotent(self):
+        pack = {'conversations': [{'name': 'Test Chat', 'module_id': 'TESTMOD', 'content_id': 'default',
+                                   'prompt': 'You are a test robot.', 'model': 'gpt-5.6-luna',
+                                   'source_version': 100}]}
+        path = self.write_pack(pack)
+        call_command('load_content', path)
+        call_command('load_content', path)
+        self.assertEqual(SinglePromptChat.objects.filter(module_id='TESTMOD').count(), 1)
+        chat = SinglePromptChat.objects.get(module_id='TESTMOD')
+        self.assertEqual(chat.model, 'gpt-5.6-luna')
+        self.assertEqual(chat.source_version, 100)
+
+    def test_high_source_version_survives_init_data(self):
+        pack = {'conversations': [{'name': 'Custom Long', 'module_id': 'OPENMOXIE_CHAT',
+                                   'content_id': 'default', 'prompt': 'Daddy Robotics prompt',
+                                   'source_version': 100}]}
+        call_command('init_data')
+        call_command('load_content', self.write_pack(pack))
+        call_command('init_data')  # factory version 2 < 100 -> must not clobber
+        chat = SinglePromptChat.objects.get(module_id='OPENMOXIE_CHAT', content_id='default')
+        self.assertEqual(chat.prompt, 'Daddy Robotics prompt')
+
+    def test_persist_seed_merges_and_replaces(self):
+        device = MoxieDevice.objects.create(device_id='d_seed')
+        PersistentData.objects.create(device=device, data={'memory_v2': {'facts': ['old fact']},
+                                                           'other': 'keep me'})
+        merge_pack = {'persist': [{'device_id': 'd_seed',
+                                   'data': {'memory_v2': {'profile': 'aspiring magician'}}}]}
+        call_command('load_content', self.write_pack(merge_pack))
+        data = PersistentData.objects.get(device=device).data
+        self.assertEqual(data['other'], 'keep me')
+        self.assertEqual(data['memory_v2']['facts'], ['old fact'])
+        self.assertEqual(data['memory_v2']['profile'], 'aspiring magician')
+
+        replace_pack = {'persist': [{'device_id': 'd_seed', 'replace': True,
+                                     'data': {'memory_v2': {'fresh': True}}}]}
+        call_command('load_content', self.write_pack(replace_pack))
+        self.assertEqual(PersistentData.objects.get(device=device).data, {'memory_v2': {'fresh': True}})
+
+    def test_persist_seed_unknown_device_fails(self):
+        pack = {'persist': [{'device_id': 'd_ghost', 'data': {}}]}
+        with self.assertRaises(CommandError):
+            call_command('load_content', self.write_pack(pack))
 
 
 class InitDataTests(TestCase):
