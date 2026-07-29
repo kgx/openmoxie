@@ -15,6 +15,12 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_SUMMARY_PROMPT = "Summarize the following conversation between the friendly robot Moxie, and the user.  Keep the summary brief, but include any important details."
 
+# GPT-5 and later models reason by default (too slow for real-time chat) and reject max_tokens
+def inference_token_params(model, max_tokens):
+    if model.startswith('gpt-5') or model.startswith('o'):
+        return { 'max_completion_tokens': max_tokens, 'reasoning_effort': 'none' }
+    return { 'max_tokens': max_tokens }
+
 '''
 Base type of a module that has a chat session interaction on Moxie.  It
 manages the history, rotating out records to keep tokens more lean.
@@ -200,8 +206,8 @@ class SingleContextChatSession(ChatSession):
             resp = client.chat.completions.create(
                         model=self._model,
                         messages=context + history,
-                        max_tokens=self._max_tokens,
-                        temperature=self._temperature
+                        temperature=self._temperature,
+                        **inference_token_params(self._model, self._max_tokens)
                     ).choices[0].message.content
         except Exception as e:
             logger.warning(f'Exception attempting inference: {e}')
@@ -240,8 +246,8 @@ class SingleContextChatSession(ChatSession):
             resp = client.chat.completions.create(
                     model=model,
                     messages=msgs,
-                    max_tokens=max_tokens,
-                    temperature=self._temperature
+                    temperature=self._temperature,
+                    **inference_token_params(model, max_tokens)
                     ).choices[0].message.content
             return resp
         except Exception as e:
