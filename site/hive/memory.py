@@ -12,7 +12,9 @@ in run_db_atomic) and are intended to be used from conversation `code` hooks:
     from hive.memory import apply_memory_ops, assemble_memory
 '''
 import logging
+import math
 import re
+import threading
 
 from .models import MemoryFragment, MoxieDevice
 from .mqtt.util import run_db_atomic
@@ -20,6 +22,56 @@ from .mqtt.util import run_db_atomic
 logger = logging.getLogger(__name__)
 
 _VALID_OPS = ('add', 'update', 'retire', 'restore')
+_EMBED_MODEL = 'text-embedding-3-small'
+_EMBED_DIM = 256
+_TOPIC_MIX = 0.3   # weight of the newest turn in the rolling topic vector
+
+# per-device rolling conversation-topic vectors; in-memory only (rewarms in one turn)
+_topic_vectors = {}
+_topic_lock = threading.Lock()
+
+
+def _embed_texts(texts):
+    # returns a list of vectors, or None when embeddings are unavailable (no key, offline,
+    # API error) - callers must treat None as 'fall back to lexical'
+    try:
+        from .mqtt.ai_factory import create_openai
+        resp = create_openai().embeddings.create(model=_EMBED_MODEL, input=list(texts),
+                                                 dimensions=_EMBED_DIM)
+        return [d.embedding for d in resp.data]
+    except Exception as e:
+        logger.debug(f'embeddings unavailable: {e}')
+        return None
+
+
+def _cosine(a, b):
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(y * y for y in b))
+    return dot / (na * nb) if na and nb else 0.0
+
+
+# Fold a just-spoken turn into the device's rolling topic vector. Called asynchronously
+# (worker pool) as notify records arrive - never from the response path.
+def update_topic_vector(device_id, text):
+    if not text or not text.strip():
+        return
+    vecs = _embed_texts([text])
+    if not vecs:
+        return
+    new = vecs[0]
+    with _topic_lock:
+        old = _topic_vectors.get(device_id)
+        if old and len(old) == len(new):
+            _topic_vectors[device_id] = [(1.0 - _TOPIC_MIX) * o + _TOPIC_MIX * n
+                                         for o, n in zip(old, new)]
+        else:
+            _topic_vectors[device_id] = new
+
+
+def get_topic_vector(device_id):
+    with _topic_lock:
+        return _topic_vectors.get(device_id)
 _WORD_RE = re.compile(r"[a-z0-9']+")
 # words too common to signal relevance
 _STOP = set('the a an and or but so to of in on at for with is are was were be been do does did '
@@ -30,8 +82,8 @@ _STOP = set('the a an and or but so to of in on at for with is are was were be b
 def _apply_ops_atomic(device_id, ops):
     device = MoxieDevice.objects.filter(device_id=device_id).first()
     if not device:
-        return {'error': f'unknown device {device_id}'}
-    applied, skipped = 0, 0
+        return {'error': f'unknown device {device_id}'}, []
+    applied, skipped, changed = 0, 0, []
     for op in ops:
         if not isinstance(op, dict) or op.get('op') not in _VALID_OPS \
                 or not op.get('bank') or not op.get('key'):
@@ -59,8 +111,9 @@ def _apply_ops_atomic(device_id, ops):
                     conf = min(1.0, max(0.0, float(op.get('confidence', 0.5))))
                 except (TypeError, ValueError):
                     conf = 0.5
-                MemoryFragment.objects.create(device=device, bank=bank, key=key,
-                                              text=str(op['text']), confidence=conf)
+                frag = MemoryFragment.objects.create(device=device, bank=bank, key=key,
+                                                     text=str(op['text']), confidence=conf)
+            changed.append((frag.pk, frag.text))
             applied += 1
         elif kind in ('retire', 'restore'):
             if frag:
@@ -69,25 +122,56 @@ def _apply_ops_atomic(device_id, ops):
                 applied += 1
             else:
                 skipped += 1
-    return {'applied': applied, 'skipped': skipped}
+    return {'applied': applied, 'skipped': skipped}, changed
+
+
+def _store_embeddings_atomic(pk_vecs):
+    for pk, vec in pk_vecs:
+        # .update() deliberately skips auto_now so embedding writes don't fake recency
+        MemoryFragment.objects.filter(pk=pk).update(embedding=vec)
 
 
 # Apply an extractor-emitted operation list to a device's memory fragments.
 # ops: [{op: add|update|retire|restore, bank, key, text?, confidence?}, ...]
 # Invalid operations are skipped, never fatal. Returns {'applied': n, 'skipped': m}.
+# Changed fragments are (re-)embedded outside the transaction; embedding failure
+# degrades to lexical-only retrieval, never blocks the ops.
 def apply_memory_ops(device_id, ops):
     try:
-        return run_db_atomic(_apply_ops_atomic, device_id, list(ops or []))
+        result, changed = run_db_atomic(_apply_ops_atomic, device_id, list(ops or []))
+        if changed:
+            vecs = _embed_texts([text for _, text in changed])
+            if vecs and len(vecs) == len(changed):
+                run_db_atomic(_store_embeddings_atomic,
+                              [(pk, vec) for (pk, _), vec in zip(changed, vecs)])
+        return result
     except Exception as e:
         logger.warning(f'apply_memory_ops failed: {e}')
         return {'error': str(e)}
+
+
+def _list_fragments_atomic(device_id, include_retired):
+    q = MemoryFragment.objects.filter(device__device_id=device_id)
+    if not include_retired:
+        q = q.filter(active=True)
+    return [f'{f.bank} | {f.key} | {f.text}' + ('' if f.active else ' [retired]')
+            for f in q.order_by('bank', 'key')]
+
+
+# Compact one-line-per-fragment listing for extractor prompts.
+def list_fragments_compact(device_id, include_retired=False):
+    try:
+        return '\n'.join(run_db_atomic(_list_fragments_atomic, device_id, include_retired))
+    except Exception as e:
+        logger.warning(f'list_fragments_compact failed: {e}')
+        return ''
 
 
 def _words(text):
     return set(_WORD_RE.findall(text.casefold())) - _STOP
 
 
-def _assemble_atomic(device_id, utterance, budget_chars, core_banks):
+def _assemble_atomic(device_id, utterance, budget_chars, core_banks, topic_vec):
     device = MoxieDevice.objects.filter(device_id=device_id).first()
     if not device:
         return ''
@@ -100,7 +184,10 @@ def _assemble_atomic(device_id, utterance, budget_chars, core_banks):
     def score(f):
         overlap = len(spoken & _words(f.text + ' ' + f.key)) if spoken else 0
         recency = 1.0 - min(1.0, (newest - f.updated).total_seconds() / (30 * 86400))
-        return overlap * 2.0 + f.confidence + recency * 0.5
+        semantic = 0.0
+        if topic_vec and f.embedding and len(f.embedding) == len(topic_vec):
+            semantic = _cosine(topic_vec, f.embedding)
+        return overlap * 2.0 + semantic * 2.0 + f.confidence + recency * 0.5
 
     core = [f for f in frags if f.bank in core_banks]
     rest = sorted((f for f in frags if f.bank not in core_banks), key=score, reverse=True)
@@ -122,13 +209,15 @@ def _assemble_atomic(device_id, utterance, budget_chars, core_banks):
     return '\n'.join(lines).strip()
 
 
-# Build the memory context block for a prompt: core banks always included,
-# remaining fragments ranked by lexical relevance to the utterance, confidence,
-# and recency, within a character budget (~4 chars/token).
+# Build the memory context block for a prompt: core banks always included, the rest
+# ranked by lexical relevance to the utterance PLUS cosine similarity to the device's
+# rolling topic vector (computed asynchronously from notify, so this path makes no
+# API calls), confidence, and recency - within a character budget (~4 chars/token).
 def assemble_memory(device_id, utterance='', budget_chars=6000,
                     core_banks=('profile', 'magic_tricks', 'goals')):
     try:
-        return run_db_atomic(_assemble_atomic, device_id, utterance, budget_chars, tuple(core_banks))
+        return run_db_atomic(_assemble_atomic, device_id, utterance, budget_chars,
+                             tuple(core_banks), get_topic_vector(device_id))
     except Exception as e:
         logger.warning(f'assemble_memory failed: {e}')
         return ''

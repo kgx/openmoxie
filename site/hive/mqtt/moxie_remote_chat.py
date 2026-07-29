@@ -182,6 +182,10 @@ class RemoteChat:
             if lines:
                 run_db_atomic(self.write_transcript_rows, device_id,
                               rcr.get('module_id', ''), rcr.get('content_id', ''), lines)
+                # fold the spoken turn into the rolling topic vector (memory v3 retrieval);
+                # already off the response path, and a no-op if embeddings are unavailable
+                from ..memory import update_topic_vector
+                update_topic_vector(device_id, ' '.join(text for _, text in lines))
         except Exception as e:
             logger.warning(f'Failed to persist transcript: {e}')
 

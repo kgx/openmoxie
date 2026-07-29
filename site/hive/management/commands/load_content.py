@@ -5,6 +5,7 @@ from deepmerge import always_merger
 from django.core.management.base import BaseCommand, CommandError
 
 from ...data_import import import_content
+from ...memory import apply_memory_ops
 from ...models import MoxieDevice, PersistentData
 
 
@@ -42,3 +43,9 @@ class Command(BaseCommand):
                 pdata.save()
                 mode = 'replaced' if seed.get('replace', False) else 'merged'
                 self.stdout.write(f"{path}: {mode} persist data for {seed['device_id']}")
+            for seed in data.get('fragments', []):
+                device_id = seed['device_id']
+                if not MoxieDevice.objects.filter(device_id=device_id).exists():
+                    raise CommandError(f'Unknown device_id {device_id}')
+                result = apply_memory_ops(device_id, seed.get('ops', []))
+                self.stdout.write(f'{path}: fragments for {device_id}: {result}')

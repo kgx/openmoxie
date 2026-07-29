@@ -6,6 +6,7 @@ import numpy
 from django.core.management import CommandError, call_command
 from django.test import TestCase
 
+from . import memory as memory_mod
 from .memory import apply_memory_ops, assemble_memory
 from .models import (ChatTranscript, MemoryFragment, MoxieDevice, MoxieSchedule,
                      PersistentData, SinglePromptChat)
@@ -269,6 +270,78 @@ class MemoryFragmentTests(TestCase):
         self.assertIn('George, age 7', tight)
         self.assertNotIn('Sam', tight)
         self.assertEqual(assemble_memory('d_ghost'), '')
+
+
+class MemoryEmbeddingTests(TestCase):
+    MAGIC_VEC = [1.0, 0.0]
+    DINO_VEC = [0.0, 1.0]
+
+    def setUp(self):
+        MoxieDevice.objects.create(device_id='d_mem')
+        self._orig_embed = memory_mod._embed_texts
+        memory_mod._topic_vectors.clear()
+        memory_mod._embed_texts = lambda texts: [
+            self.MAGIC_VEC if 'magic' in t.lower() else self.DINO_VEC for t in texts]
+
+    def tearDown(self):
+        memory_mod._embed_texts = self._orig_embed
+        memory_mod._topic_vectors.clear()
+
+    def test_fragments_embedded_on_write(self):
+        apply_memory_ops('d_mem', [{'op': 'add', 'bank': 'shows', 'key': 'talent',
+                                    'text': 'Planning a magic show'}])
+        frag = MemoryFragment.objects.get(key='talent')
+        self.assertEqual(frag.embedding, self.MAGIC_VEC)
+
+    def test_topic_vector_rolls_with_decay(self):
+        memory_mod.update_topic_vector('d_mem', 'we talked about magic tricks')
+        self.assertEqual(memory_mod.get_topic_vector('d_mem'), self.MAGIC_VEC)
+        memory_mod.update_topic_vector('d_mem', 'now we talk dinosaurs')
+        v = memory_mod.get_topic_vector('d_mem')
+        self.assertAlmostEqual(v[0], 0.7)
+        self.assertAlmostEqual(v[1], 0.3)
+
+    def test_assemble_prefers_topic_matching_fragment(self):
+        apply_memory_ops('d_mem', [
+            {'op': 'add', 'bank': 'shows', 'key': 'talent', 'text': 'Planning a magic show'},
+            {'op': 'add', 'bank': 'animals', 'key': 'trex', 'text': 'Loves the T-Rex dinosaur'},
+        ])
+        memory_mod.update_topic_vector('d_mem', 'magic magic magic')
+        # utterance gives no lexical signal; budget fits only one non-core fragment
+        ctx = assemble_memory('d_mem', utterance='', budget_chars=40, core_banks=())
+        self.assertIn('magic show', ctx)
+        self.assertNotIn('T-Rex', ctx)
+
+    def test_embedding_outage_degrades_to_lexical(self):
+        memory_mod._embed_texts = lambda texts: None
+        r = apply_memory_ops('d_mem', [{'op': 'add', 'bank': 'shows', 'key': 'talent',
+                                        'text': 'Planning a magic show'}])
+        self.assertEqual(r, {'applied': 1, 'skipped': 0})
+        self.assertIsNone(MemoryFragment.objects.get(key='talent').embedding)
+        memory_mod.update_topic_vector('d_mem', 'anything')
+        self.assertIsNone(memory_mod.get_topic_vector('d_mem'))
+        ctx = assemble_memory('d_mem', utterance='tell me about the magic show', core_banks=())
+        self.assertIn('magic show', ctx)
+
+
+class LoadContentFragmentTests(TestCase):
+    def test_fragments_section_seeds_rows(self):
+        MoxieDevice.objects.create(device_id='d_seed')
+        pack = {'fragments': [{'device_id': 'd_seed',
+                               'ops': [{'op': 'add', 'bank': 'profile', 'key': 'summary',
+                                        'text': 'George, aspiring magician', 'confidence': 1.0}]}]}
+        import tempfile
+        f = tempfile.NamedTemporaryFile('w', suffix='.json', delete=False)
+        json.dump(pack, f)
+        f.close()
+        call_command('load_content', f.name)
+        self.assertEqual(MemoryFragment.objects.filter(bank='profile').count(), 1)
+        bad = {'fragments': [{'device_id': 'd_ghost', 'ops': []}]}
+        f2 = tempfile.NamedTemporaryFile('w', suffix='.json', delete=False)
+        json.dump(bad, f2)
+        f2.close()
+        with self.assertRaises(CommandError):
+            call_command('load_content', f2.name)
 
 
 class InitDataTests(TestCase):

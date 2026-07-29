@@ -143,6 +143,7 @@ class MemoryFragment(models.Model):
     confidence = models.FloatField(default=0.5)
     times_seen = models.IntegerField(default=1)
     active = models.BooleanField(default=True) # retired fragments are flagged, never deleted
+    embedding = models.JSONField(null=True, blank=True)  # 256-dim vector, computed on write
     created = models.DateTimeField(auto_now_add=True)
     updated = models.DateTimeField(auto_now=True)
 
