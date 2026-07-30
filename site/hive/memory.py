@@ -197,8 +197,17 @@ def list_fragments_compact(device_id, include_retired=False):
         return ''
 
 
+def _stem(w):
+    # cheap singular/plural folding so 'twirly' cues 'twirlies', 'bunnies' cues 'bunny'
+    if len(w) > 4 and w.endswith('ies'):
+        return w[:-3] + 'y'
+    if len(w) > 3 and w.endswith('s') and not w.endswith('ss'):
+        return w[:-1]
+    return w
+
+
 def _words(text):
-    return set(_WORD_RE.findall(text.casefold())) - _STOP
+    return {_stem(w) for w in _WORD_RE.findall(text.casefold())} - _STOP
 
 
 # details must earn their way into context: score at/above this = cued by conversation

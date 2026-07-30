@@ -358,6 +358,14 @@ class MemoryHabituationTests(TestCase):
         ctx = assemble_memory('d_hab', utterance='can we practice the floating pencil')
         self.assertIn('Floating pencil', ctx)
 
+    def test_singular_cue_matches_plural_memory(self):
+        apply_memory_ops('d_hab', [{'op': 'add', 'bank': 'likes', 'key': 'twirlies',
+                                    'text': 'Collects tiny seashells called twirlies',
+                                    'confidence': 0.9}])
+        memory_mod._topic_vectors.pop('d_hab', None)
+        ctx = assemble_memory('d_hab', utterance='I found a pretty twirly today')
+        self.assertIn('twirlies', ctx)
+
     def test_rotation_habituates_across_calls(self):
         memory_mod._topic_vectors.pop('d_hab', None)
         first = assemble_memory('d_hab', utterance='')
