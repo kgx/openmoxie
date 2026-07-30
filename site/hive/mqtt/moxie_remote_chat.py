@@ -11,7 +11,8 @@ history of the conversation and provides mostly seemless conversation context fo
 even when the user provides input in multiple speech windows before hearing a response.
 '''
 import concurrent.futures
-from ..models import SinglePromptChat, MoxieDevice, ChatTranscript
+import json
+from ..models import SinglePromptChat, MoxieDevice, ChatTranscript, ChatSessionState
 from .util import run_db_atomic
 from ..automarkup import process as automarkup_process
 from ..automarkup import initialize_rules as automarkup_initialize_rules
@@ -26,6 +27,8 @@ _ENABLE_GLOBAL_COMMANDS = True
 _LOG_ALL_RCR = False
 _LOG_NOTIFY_RCR = True
 _PERSIST_TRANSCRIPTS = True
+_PERSIST_SESSIONS = True
+_SESSION_RESTORE_WINDOW_SECS = 1800
 _MAX_WORKER_THREADS = 5
 
 logger = logging.getLogger(__name__)
@@ -117,7 +120,56 @@ class RemoteChat:
         # new session needed
         new_session = { 'id': id, 'session': maker['xtor'](**maker['params']) }
         self._device_sessions[device_id] = new_session
+        if _PERSIST_SESSIONS:
+            self.restore_session_state(device_id, id, new_session['session'])
         return new_session['session']
+
+    # Snapshot the device's live session to the DB (runs on worker pool) so a server
+    # restart mid-conversation resumes instead of forgetting
+    def save_session_state(self, device_id):
+        try:
+            rec = self._device_sessions.get(device_id)
+            if not rec:
+                return
+            sess = rec['session']
+            local = {}
+            for k, v in getattr(sess, '_local_data', {}).items():
+                try:
+                    json.dumps(v)
+                    local[k] = v
+                except (TypeError, ValueError):
+                    pass
+            run_db_atomic(self.write_session_state, device_id, rec['id'],
+                          list(getattr(sess, '_history', [])),
+                          getattr(sess, '_total_volleys', 0), local)
+        except Exception as e:
+            logger.warning(f'Failed to save session state: {e}')
+
+    def write_session_state(self, device_id, session_id, history, volleys, local):
+        device = MoxieDevice.objects.filter(device_id=device_id).first()
+        if device:
+            ChatSessionState.objects.update_or_create(
+                device=device, defaults={'session_id': session_id, 'history': history,
+                                         'total_volleys': volleys, 'local_data': local})
+
+    def restore_session_state(self, device_id, id, session):
+        try:
+            state = run_db_atomic(self.read_session_state, device_id)
+            if state and state['session_id'] == id:
+                session._history = state['history']
+                session._total_volleys = state['total_volleys']
+                session._local_data.update(state['local_data'])
+                logger.info(f'Restored session for {device_id} ({id}, {state["total_volleys"]} volleys)')
+        except Exception as e:
+            logger.warning(f'Failed to restore session state: {e}')
+
+    def read_session_state(self, device_id):
+        from django.utils import timezone
+        rec = ChatSessionState.objects.filter(device__device_id=device_id).first()
+        if rec and (timezone.now() - rec.updated).total_seconds() <= _SESSION_RESTORE_WINDOW_SECS:
+            return {'session_id': rec.session_id, 'history': rec.history,
+                    'total_volleys': rec.total_volleys, 'local_data': rec.local_data}
+        return None
 
     # Get's a chat session object for use in the web chat
     def get_web_session_for_module(self, device_id, module_id, content_id):
@@ -216,6 +268,9 @@ class RemoteChat:
             if cmd == 'notify':
                 volley = Volley(rcr, device_id=device_id, robot_data=volley_data, local_data=sess.local_data, data_only=True)
                 sess.ingest_notify(volley)
+                if _PERSIST_SESSIONS:
+                    # notify carries the ground-truth history; snapshot after each one
+                    self._worker_queue.submit(self.save_session_state, device_id)
             else:
                 volley = Volley(rcr, device_id=device_id, robot_data=volley_data, local_data=sess.local_data)
                 if not self.handled_global(device_id, volley):

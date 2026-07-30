@@ -696,6 +696,61 @@ class DirectorTests(TestCase):
             self.director.DIRECTIVES.pop('magic_test', None)
 
 
+class SessionPersistenceTests(TestCase):
+    def setUp(self):
+        from types import SimpleNamespace
+
+        from .models import ChatSessionState
+        from .mqtt.moxie_remote_chat import RemoteChat
+        self.ChatSessionState = ChatSessionState
+        self.SimpleNamespace = SimpleNamespace
+        MoxieDevice.objects.create(device_id='d_sess')
+        self.rc = RemoteChat(SimpleNamespace())
+
+    def live_session(self):
+        return self.SimpleNamespace(
+            _history=[{'role': 'user', 'content': 'hi'},
+                      {'role': 'assistant', 'content': 'hello there'}],
+            _total_volleys=7,
+            _local_data={'mem_ckpt': 40, 'convo_summary': 'we chatted',
+                         'not_serializable': object()})
+
+    def test_save_and_restore_roundtrip(self):
+        self.rc._device_sessions['d_sess'] = {'id': 'OPENMOXIE_CHAT/memory3',
+                                              'session': self.live_session()}
+        self.rc.save_session_state('d_sess')
+        fresh = self.SimpleNamespace(_history=[], _total_volleys=0, _local_data={})
+        self.rc.restore_session_state('d_sess', 'OPENMOXIE_CHAT/memory3', fresh)
+        self.assertEqual(fresh._total_volleys, 7)
+        self.assertEqual(fresh._history[-1]['content'], 'hello there')
+        self.assertEqual(fresh._local_data['convo_summary'], 'we chatted')
+        self.assertNotIn('not_serializable', fresh._local_data)
+
+    def test_restore_skips_mismatched_module_and_stale_state(self):
+        import datetime as dt
+
+        from django.utils import timezone as djtz
+        self.rc._device_sessions['d_sess'] = {'id': 'OPENMOXIE_CHAT/memory3',
+                                              'session': self.live_session()}
+        self.rc.save_session_state('d_sess')
+        other = self.SimpleNamespace(_history=[], _total_volleys=0, _local_data={})
+        self.rc.restore_session_state('d_sess', 'ROLEPLAY/default', other)
+        self.assertEqual(other._total_volleys, 0)
+        self.ChatSessionState.objects.all().update(
+            updated=djtz.now() - dt.timedelta(hours=2))
+        stale = self.SimpleNamespace(_history=[], _total_volleys=0, _local_data={})
+        self.rc.restore_session_state('d_sess', 'OPENMOXIE_CHAT/memory3', stale)
+        self.assertEqual(stale._total_volleys, 0)
+
+    def test_save_overwrites_single_row_per_device(self):
+        self.rc._device_sessions['d_sess'] = {'id': 'A/x', 'session': self.live_session()}
+        self.rc.save_session_state('d_sess')
+        self.rc._device_sessions['d_sess'] = {'id': 'B/y', 'session': self.live_session()}
+        self.rc.save_session_state('d_sess')
+        self.assertEqual(self.ChatSessionState.objects.count(), 1)
+        self.assertEqual(self.ChatSessionState.objects.first().session_id, 'B/y')
+
+
 class InitDataTests(TestCase):
     def test_factory_data_loads_and_preserves_local_edits(self):
         call_command('init_data')

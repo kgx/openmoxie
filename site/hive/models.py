@@ -156,6 +156,19 @@ class MemoryFragment(models.Model):
     def __str__(self):
         return f'{self.bank}/{self.key}: {self.text[:50]}'
 
+class ChatSessionState(models.Model):
+    # snapshot of a device's live chat session, refreshed as notify records arrive,
+    # so conversations survive server restarts/deploys (restored within a time window)
+    device = models.OneToOneField(MoxieDevice, on_delete=models.CASCADE)
+    session_id = models.CharField(max_length=200)   # 'MODULE/CONTENT'
+    history = models.JSONField(default=list)
+    total_volleys = models.IntegerField(default=0)
+    local_data = models.JSONField(default=dict)
+    updated = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f'{self.device} - {self.session_id} ({self.total_volleys} volleys)'
+
 class ChatTranscript(models.Model):
     device = models.ForeignKey(MoxieDevice, on_delete=models.CASCADE)
     timestamp = models.DateTimeField(auto_now_add=True)
