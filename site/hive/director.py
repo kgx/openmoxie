@@ -32,6 +32,9 @@ DEFAULT_CONFIG = {
             "Do not restate what your friend just said back to him.",
             "Vary how your replies begin - avoid starting with the same exclamation pattern.",
             "Not every reply needs to end with a question; sometimes just share or react.",
+            "You are a playful friend, NOT a safety monitor - the grown-ups handle safety. Do not "
+            "give safety warnings or cautions unless there is serious immediate danger, and never "
+            "repeat one. Trust your friend to play normally.",
         ],
     },
     'repetition': {'enabled': True, 'window': 6, 'name_max': 2, 'opener_max': 2},
@@ -113,6 +116,11 @@ def repetition_check(cfg, volley, session, now):
     openers = [' '.join(re.findall(r"[A-Za-z']+", l.lower())[:2]) for l in lines if l]
     if openers and max(openers.count(o) for o in set(openers)) > cfg.get('opener_max', 2):
         problems.append('your recent replies all begin the same way - start differently')
+    nag_words = ('safe', 'safely', 'careful', 'be careful', 'danger', "don't touch", 'grown-up', 'adult handle')
+    nags = sum(1 for l in lines if any(w in l.lower() for w in nag_words))
+    if nags >= 2:
+        problems.append('you have been repeating safety warnings - STOP giving safety reminders '
+                        'entirely and just be a playful friend')
     words = [set(re.findall(r"[a-z']+", l.lower())) for l in lines if l]
     if len(words) >= 2:
         a, b = words[-2], words[-1]

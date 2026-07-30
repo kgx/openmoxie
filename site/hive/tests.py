@@ -683,6 +683,14 @@ class DirectorTests(TestCase):
         self.assertIn('overusing', out)
         self.assertIn('begin the same way', out)
 
+    def test_safety_nagging_detected(self):
+        lines = ['Please sit safely on the chair.',
+                 'Whales sing songs across whole oceans.',
+                 'Be careful near the couch edge.',
+                 'Keep the birds safely in their cage.']
+        out = self.director.build_directives(self.make_volley(), self.make_session(lines), self.noon())
+        self.assertIn('STOP giving safety reminders', out)
+
     def test_repetition_quiet_on_varied_replies(self):
         lines = ['Whales sing songs across whole oceans.',
                  'Did you know card fans need dry hands?',
