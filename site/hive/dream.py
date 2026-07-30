@@ -104,7 +104,9 @@ def run_dream(device_id):
                 'the newer information. NEVER modify the objectives bank. Do NOT change fragments that are '
                 'fine as-is. Additionally: (1) MAINTAIN the "gists" bank - one short zoomed-out summary '
                 'per interest area (keys like gist:magic, gist:animals, gist:comfort), each a single '
-                'sentence capturing the big picture of that area WITHOUT fine details; add or update '
+                'sentence capturing the big picture of that area WITHOUT fine details, grounded in the '
+                'detail fragments - never escalate intensity words (likes must not become loves or '
+                'obsessed) and prefer the child\'s own phrasing; add or update '
                 'gists so they reflect the current detail fragments, spanning ALL of the child\'s '
                 'interest areas, not just the largest one. (2) ADD up to 3 fresh entries to the "seeds" '
                 'bank - fun, curiosity-sparking conversation ideas the child has NOT heard yet, spread '
@@ -129,6 +131,65 @@ def run_dream(device_id):
     result = apply_memory_ops(device_id, ops)
     run_db_atomic(_prune_seeds_atomic, device_id)
     return {'decayed': decayed, 'dup_candidates': len(dups), **result}
+
+
+DRIFT_TRANSCRIPT_DAYS = 7
+DRIFT_TRANSCRIPT_LINES = 400
+REPORT_KEEP = 14
+
+
+def _transcript_atomic(device_id, days, max_lines):
+    import datetime as dt
+    cutoff = timezone.now() - dt.timedelta(days=days)
+    rows = ChatTranscript.objects.filter(device__device_id=device_id,
+                                         timestamp__gte=cutoff).order_by('-id')[:max_lines]
+    return [f'{r.role}: {r.text}' for r in reversed(list(rows))]
+
+
+# Compare what memory CLAIMS against what the child actually SAID - the antidote to
+# emergent feedback loops (Moxie-originated "memories", interest phantoms, intensity
+# drift). Read-only: returns findings for the nightly report, changes nothing.
+def drift_audit(device_id):
+    frags, lines = run_db_atomic(_listing_atomic, device_id)
+    transcript = run_db_atomic(_transcript_atomic, device_id,
+                               DRIFT_TRANSCRIPT_DAYS, DRIFT_TRANSCRIPT_LINES)
+    if not frags or not transcript:
+        return []
+    prompt = ('You are auditing the long-term memory of Moxie, a robot friend of a child, for '
+              'drift. MEMORY FRAGMENTS are listed below (bank | key | confidence | age | text), '
+              'followed by a TRANSCRIPT of recent real conversations. Identify fragments that are '
+              'UNGROUNDED or DRIFTED: not supported by anything the child actually said or did; '
+              'originated from Moxie rather than the child; or stated more intensely than the '
+              'evidence supports (e.g. likes stated as obsessed). Older fragments may be grounded '
+              'in conversations before this transcript window - only flag OLD fragments when the '
+              'transcript CONTRADICTS them. Ignore the objectives and seeds banks. Reply with '
+              'ONLY a JSON array: [{"bank": str, "key": str, "issue": str}]. An empty array '
+              'means the memory is healthy.'
+              '\n\nMEMORY FRAGMENTS:\n' + '\n'.join(lines)
+              + '\n\nTRANSCRIPT:\n' + '\n'.join(transcript))
+    try:
+        raw = _dream_llm(prompt)
+        cleaned = raw
+        if '```' in cleaned:
+            cleaned = cleaned.split('```')[1]
+            if cleaned.startswith('json'):
+                cleaned = cleaned[4:]
+        findings = json.loads(cleaned)
+        return findings if isinstance(findings, list) else []
+    except Exception as e:
+        return [{'error': str(e)}]
+
+
+def write_report(results, dest_dir=None):
+    reports = dest_dir or os.path.join(settings.DATA_STORE_DIR, 'reports')
+    os.makedirs(reports, exist_ok=True)
+    dest = os.path.join(reports, 'dream-' + timezone.localtime().strftime('%Y-%m-%d') + '.json')
+    with open(dest, 'w') as f:
+        json.dump(results, f, indent=2)
+    existing = sorted(x for x in os.listdir(reports) if x.startswith('dream-'))
+    for old in existing[:-REPORT_KEEP]:
+        os.remove(os.path.join(reports, old))
+    return dest
 
 
 def _prune_seeds_atomic(device_id):
@@ -184,9 +245,14 @@ def nightly_maintenance(only_devices=None):
         device_ids = [d for d in device_ids if d in only_devices]
     for device_id in device_ids:
         results[device_id] = run_dream(device_id)
+        results[device_id]['drift'] = drift_audit(device_id)
+        if results[device_id]['drift']:
+            logger.warning(f'dream: drift findings for {device_id}: {results[device_id]["drift"]}')
         logger.info(f'dream: {device_id} -> {results[device_id]}')
     backup = backup_database()
     logger.info(f'dream: database backed up to {backup}')
+    report = write_report(results)
+    logger.info(f'dream: report written to {report}')
     return results
 
 

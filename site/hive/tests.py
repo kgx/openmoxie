@@ -518,6 +518,46 @@ class DreamTests(TestCase):
         remaining = [f for f in os.listdir(backups) if f.startswith('db-')]
         self.assertEqual(len(remaining), self.dream.BACKUP_KEEP)
 
+    def test_drift_audit_reports_findings_without_changes(self):
+        device = MoxieDevice.objects.get(device_id='d_mem')
+        ChatTranscript.objects.create(device=device, role='user', text='I like bunnies a little')
+        self._orig_llm = self.dream._dream_llm
+        prompts = []
+        def llm(prompt):
+            prompts.append(prompt)
+            return json.dumps([{'bank': 'other', 'key': 'stale',
+                               'issue': 'never mentioned by the child'}])
+        self.dream._dream_llm = llm
+        try:
+            findings = self.dream.drift_audit('d_mem')
+        finally:
+            self.dream._dream_llm = self._orig_llm
+        self.assertEqual(findings[0]['key'], 'stale')
+        self.assertIn('TRANSCRIPT:', prompts[0])
+        self.assertIn('bunnies a little', prompts[0])
+        self.assertTrue(MemoryFragment.objects.get(key='stale').active,
+                        'audit must be read-only')
+
+    def test_drift_audit_skips_without_transcript(self):
+        boom = lambda prompt: (_ for _ in ()).throw(AssertionError('must not call LLM'))
+        self._orig_llm = self.dream._dream_llm
+        self.dream._dream_llm = boom
+        try:
+            self.assertEqual(self.dream.drift_audit('d_mem'), [])
+        finally:
+            self.dream._dream_llm = self._orig_llm
+
+    def test_write_report_persists_and_prunes(self):
+        import os
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        for i in range(20):
+            open(os.path.join(tmp, f'dream-2020-01-{i+1:02d}.json'), 'w').close()
+        dest = self.dream.write_report({'d_x': {'applied': 1, 'drift': []}}, dest_dir=tmp)
+        self.assertTrue(os.path.exists(dest))
+        self.assertEqual(len([f for f in os.listdir(tmp) if f.startswith('dream-')]),
+                         self.dream.REPORT_KEEP)
+
     def test_nightly_tick_gates_on_hour_day_and_activity(self):
         import datetime as dt
         import os

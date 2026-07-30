@@ -35,6 +35,8 @@ DEFAULT_CONFIG = {
             "You are a playful friend, NOT a safety monitor - the grown-ups handle safety. Do not "
             "give safety warnings or cautions unless there is serious immediate danger, and never "
             "repeat one. Trust your friend to play normally.",
+            "Match your friend's energy warmly, but do not get stuck mirroring one mood or "
+            "escalating silliness endlessly - gently steer back to balanced fun.",
         ],
     },
     'repetition': {'enabled': True, 'window': 6, 'name_max': 2, 'opener_max': 2},
