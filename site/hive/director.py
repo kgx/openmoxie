@@ -38,6 +38,8 @@ DEFAULT_CONFIG = {
     'time_of_day': {'enabled': True, 'bedtime': '20:30', 'wind_down_minutes': 60},
     'session_arc': {'enabled': True, 'long_session_volleys': 120},
     'topic_dwell': {'enabled': True, 'minutes': 10},
+    'objective': {'enabled': True, 'min_volleys': 6, 'max_volleys': 60},
+    'novelty': {'enabled': True, 'min_volleys': 12},
 }
 
 
@@ -144,6 +146,54 @@ def session_arc(cfg, volley, session, now):
         return ('This has been a very long chat - gently suggest taking a break to do something '
                 'in the real world, like practicing a trick for the family, and offer to continue later.')
     return None
+
+
+def _bank_fragments(device_id, bank):
+    from .models import MemoryFragment
+    from .mqtt.util import run_db_atomic
+
+    def fetch():
+        return list(MemoryFragment.objects.filter(device__device_id=device_id, bank=bank,
+                                                  active=True).order_by('key'))
+    return run_db_atomic(fetch)
+
+
+@directive('objective')
+def parental_objective(cfg, volley, session, now):
+    # weave in at most one parent-authored goal per session, rotating daily, mid-session
+    tv = getattr(session, 'total_volleys', 0)
+    if not (cfg.get('min_volleys', 6) <= tv <= cfg.get('max_volleys', 60)):
+        return None
+    if volley.local_data.get('objective_done'):
+        return None
+    frags = _bank_fragments(volley.device_id, 'objectives')
+    if not frags:
+        return None
+    pick = frags[now.timetuple().tm_yday % len(frags)]
+    volley.local_data['objective_done'] = True
+    return ('Parent goal - work this in naturally and gently, never preachy, at most once '
+            'this conversation: ' + pick.text)
+
+
+@directive('novelty')
+def novelty_seed(cfg, volley, session, now):
+    # serve one dream-generated fresh idea per session once the chat is warmed up,
+    # then retire it so it is never repeated
+    tv = getattr(session, 'total_volleys', 0)
+    if tv < cfg.get('min_volleys', 12) or volley.local_data.get('seed_served'):
+        return None
+    frags = _bank_fragments(volley.device_id, 'seeds')
+    if not frags:
+        return None
+    pick = frags[0]
+    volley.local_data['seed_served'] = True
+    try:
+        from .memory import apply_memory_ops
+        apply_memory_ops(volley.device_id, [{'op': 'retire', 'bank': 'seeds', 'key': pick.key}])
+    except Exception:
+        pass
+    return ('When there is a natural lull or the topic goes stale, offer this new idea to '
+            'explore together: ' + pick.text)
 
 
 @directive('topic_dwell')

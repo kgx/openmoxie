@@ -22,6 +22,8 @@ from .mqtt.util import run_db_atomic
 logger = logging.getLogger(__name__)
 
 _VALID_OPS = ('add', 'update', 'retire', 'restore')
+# control banks: consumed by the director, never injected as "memories"
+CONTROL_BANKS = ('objectives', 'seeds')
 _EMBED_MODEL = 'text-embedding-3-small'
 _EMBED_DIM = 256
 _TOPIC_MIX = 0.3   # weight of the newest turn in the rolling topic vector
@@ -203,7 +205,8 @@ def _assemble_atomic(device_id, utterance, budget_chars, core_banks, topic_vec):
     device = MoxieDevice.objects.filter(device_id=device_id).first()
     if not device:
         return ''
-    frags = list(MemoryFragment.objects.filter(device=device, active=True))
+    frags = [f for f in MemoryFragment.objects.filter(device=device, active=True)
+             if f.bank not in CONTROL_BANKS]
     if not frags:
         return ''
     newest = max(f.updated for f in frags)

@@ -34,7 +34,8 @@ logger = logging.getLogger(__name__)
 
 DREAM_MODEL = 'gpt-5.6-terra'
 DREAM_HOUR = 3               # local time (settings.TIME_ZONE)
-CORE_BANKS = ('profile', 'magic_tricks')
+CORE_BANKS = ('profile', 'magic_tricks', 'objectives')  # objectives are parent-authored: never decay
+SEEDS_MAX = 8
 DECAY_AFTER_DAYS = 45
 DUP_THRESHOLD = 0.88
 BACKUP_KEEP = 14
@@ -101,7 +102,10 @@ def run_dream(device_id):
                 'Merge duplicate fragments (update the better key with the combined text, retire the other). '
                 'Distill episodes older than two weeks into durable facts in the right banks, then retire '
                 'those episodes. Retire trivial or clearly stale fragments. Correct contradictions, keeping '
-                'the newer information. Do NOT change fragments that are fine as-is; an empty array is fine.'
+                'the newer information. NEVER modify the objectives bank. Do NOT change fragments that are '
+                'fine as-is. Additionally: ADD up to 3 fresh entries to the "seeds" bank - fun, curiosity-'
+                'sparking conversation ideas the child has NOT heard yet (new tricks to learn, magician '
+                'stories, wow-facts adjacent to his interests), each one sentence, keys like seed:<slug>.'
                 '\n\nMEMORY FRAGMENTS:\n' + '\n'.join(lines))
     try:
         raw = _dream_llm(prompt)
@@ -116,8 +120,18 @@ def run_dream(device_id):
         ops = json.loads(cleaned)
     except Exception:
         return {'decayed': decayed, 'error': 'unparseable: ' + raw[:200]}
-    result = apply_memory_ops(device_id, ops) if isinstance(ops, list) else {'applied': 0, 'skipped': 0}
+    ops = [op for op in ops if isinstance(op, dict) and op.get('bank') != 'objectives'] \
+        if isinstance(ops, list) else []
+    result = apply_memory_ops(device_id, ops)
+    run_db_atomic(_prune_seeds_atomic, device_id)
     return {'decayed': decayed, 'dup_candidates': len(dups), **result}
+
+
+def _prune_seeds_atomic(device_id):
+    seeds = MemoryFragment.objects.filter(device__device_id=device_id, bank='seeds',
+                                          active=True).order_by('-updated')
+    for old in seeds[SEEDS_MAX:]:
+        MemoryFragment.objects.filter(pk=old.pk).update(active=False)
 
 
 def backup_database(src_path=None, dest_dir=None):

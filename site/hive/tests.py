@@ -398,6 +398,24 @@ class DreamTests(TestCase):
         self.assertGreaterEqual(r['dup_candidates'], 1)
         self.assertFalse(MemoryFragment.objects.get(key='dupe-b').active)
 
+    def test_run_dream_protects_objectives_and_prunes_seeds(self):
+        apply_memory_ops('d_mem', [{'op': 'add', 'bank': 'objectives', 'key': 'obj:kind',
+                                    'text': 'Encourage kindness'}])
+        apply_memory_ops('d_mem', [{'op': 'add', 'bank': 'seeds', 'key': f'seed:{i}',
+                                    'text': f'idea {i}'} for i in range(12)])
+        self._orig_llm = self.dream._dream_llm
+        self.dream._dream_llm = lambda prompt: json.dumps([
+            {'op': 'retire', 'bank': 'objectives', 'key': 'obj:kind'},   # must be blocked
+            {'op': 'add', 'bank': 'seeds', 'key': 'seed:new', 'text': 'a fresh idea'}])
+        try:
+            self.dream.run_dream('d_mem')
+        finally:
+            self.dream._dream_llm = self._orig_llm
+        self.assertTrue(MemoryFragment.objects.get(key='obj:kind').active,
+                        'dream must never touch objectives')
+        active_seeds = MemoryFragment.objects.filter(bank='seeds', active=True).count()
+        self.assertEqual(active_seeds, self.dream.SEEDS_MAX)
+
     def test_run_dream_unparseable_is_safe(self):
         self._orig_llm = self.dream._dream_llm
         self.dream._dream_llm = lambda prompt: 'I refuse to emit JSON'
@@ -540,6 +558,45 @@ class DirectorTests(TestCase):
             with memory_mod._topic_lock:
                 memory_mod._topic_vectors.pop('d_dir', None)
                 memory_mod._topic_history.pop('d_dir', None)
+
+    def test_objective_directive_rotates_and_fires_once(self):
+        MoxieDevice.objects.create(device_id='d_dir')
+        apply_memory_ops('d_dir', [
+            {'op': 'add', 'bank': 'objectives', 'key': 'obj:chanley',
+             'text': 'Encourage being kind to his sister Chanley.'},
+        ])
+        v = self.make_volley()
+        out = self.director.build_directives(v, self.make_session(volleys=10), self.noon())
+        self.assertIn('Parent goal', out)
+        self.assertIn('Chanley', out)
+        out2 = self.director.build_directives(v, self.make_session(volleys=11), self.noon())
+        self.assertNotIn('Parent goal', out2)  # once per session
+        early = self.director.build_directives(self.make_volley(), self.make_session(volleys=2), self.noon())
+        self.assertNotIn('Parent goal', early)  # outside the volley window
+
+    def test_novelty_directive_serves_and_retires_seed(self):
+        MoxieDevice.objects.create(device_id='d_dir')
+        apply_memory_ops('d_dir', [{'op': 'add', 'bank': 'seeds', 'key': 'seed:houdini',
+                                    'text': 'The story of Houdini and the milk can.'}])
+        v = self.make_volley()
+        out = self.director.build_directives(v, self.make_session(volleys=20), self.noon())
+        self.assertIn('Houdini', out)
+        self.assertFalse(MemoryFragment.objects.get(key='seed:houdini').active,
+                         'served seeds must be retired')
+        out2 = self.director.build_directives(self.make_volley(), self.make_session(volleys=20), self.noon())
+        self.assertNotIn('Houdini', out2)
+
+    def test_control_banks_never_leak_into_memory_context(self):
+        MoxieDevice.objects.create(device_id='d_dir')
+        apply_memory_ops('d_dir', [
+            {'op': 'add', 'bank': 'profile', 'key': 'summary', 'text': 'George the magician'},
+            {'op': 'add', 'bank': 'objectives', 'key': 'obj:bed', 'text': 'Encourage bedtime routine'},
+            {'op': 'add', 'bank': 'seeds', 'key': 'seed:x', 'text': 'Card fan history'},
+        ])
+        ctx = assemble_memory('d_dir')
+        self.assertIn('George the magician', ctx)
+        self.assertNotIn('bedtime routine', ctx)
+        self.assertNotIn('Card fan history', ctx)
 
     def test_custom_directive_registration(self):
         @self.director.directive('magic_test')
