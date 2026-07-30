@@ -474,6 +474,93 @@ class DreamTests(TestCase):
                 os.remove(marker)
 
 
+class StandardHooksTests(TestCase):
+    def setUp(self):
+        import time
+        from types import SimpleNamespace
+
+        from . import hooks as hooks_mod
+        from .mqtt.volley import Volley
+        self.time = time
+        self.hooks = hooks_mod
+        self.Volley = Volley
+        self.SimpleNamespace = SimpleNamespace
+        MoxieDevice.objects.create(device_id='d_hooks')
+        self._orig_embed = memory_mod._embed_texts
+        memory_mod._embed_texts = lambda texts: [[1.0, 0.0] for _ in texts]
+        apply_memory_ops('d_hooks', [{'op': 'add', 'bank': 'profile', 'key': 'summary',
+                                      'text': 'A test child who loves rockets'}])
+
+    def tearDown(self):
+        memory_mod._embed_texts = self._orig_embed
+
+    def make_volley(self, speech='hello'):
+        v = self.Volley({'command': 'continue', 'speech': speech, 'backend': 'router',
+                         'event_id': 'e1'}, device_id='d_hooks',
+                        robot_data={'config': {'child_pii': {'nickname': 'Testy'}},
+                                    'state': {}, 'persist': {}})
+        return v
+
+    def make_session(self, volleys=10, summarize=None):
+        return self.SimpleNamespace(total_volleys=volleys, _history=[],
+                                    summarize=summarize or (lambda **kw: ''))
+
+    def test_pre_process_populates_context_and_notes(self):
+        h = self.hooks.make_standard_hooks()
+        v = self.make_volley()
+        h['pre_process'](v, self.make_session())
+        self.assertIn('loves rockets', v.local_data['memory_context'])
+        self.assertIn('at most once every few replies', v.local_data['director_notes'])
+
+    def test_complete_handler_applies_ops_episode_and_guidance(self):
+        prompts = []
+        def summarize(prompt_base=None, model=None, max_tokens=None, **kw):
+            prompts.append(prompt_base)
+            if prompt_base:
+                return json.dumps([{'op': 'add', 'bank': 'likes', 'key': 'rockets',
+                                    'text': 'Loves rockets', 'confidence': 0.9}])
+            return 'We talked about rockets.'
+        h = self.hooks.make_standard_hooks(guidance='EXTRA-GUIDE-TOKEN.')
+        h['complete_handler'](self.make_volley(), self.make_session(10, summarize))
+        self.assertIn('EXTRA-GUIDE-TOKEN', prompts[0])
+        self.assertTrue(MemoryFragment.objects.filter(key='rockets').exists())
+        ep = MemoryFragment.objects.filter(bank='episodes')
+        self.assertEqual(ep.count(), 1)
+        self.assertTrue(ep[0].text.startswith('We talked'))
+
+    def test_complete_handler_skips_short_sessions(self):
+        boom = lambda **kw: (_ for _ in ()).throw(AssertionError('must not run'))
+        self.hooks.make_standard_hooks()['complete_handler'](
+            self.make_volley(), self.make_session(volleys=2, summarize=boom))
+
+    def test_post_process_replaces_opener_with_fallback_on_failure(self):
+        h = self.hooks.make_standard_hooks()
+        v = self.make_volley()
+        v.set_output('<opener>', None)
+        good = self.make_session(1, lambda **kw: '"Good morning, rocket friend."')
+        h['post_process'](v, good)
+        self.assertEqual(v.response['output']['text'], 'Good morning, rocket friend.')
+        v2 = self.make_volley()
+        v2.set_output('<opener>', None)
+        bad = self.make_session(1, lambda **kw: (_ for _ in ()).throw(RuntimeError('api down')))
+        h['post_process'](v2, bad)
+        self.assertNotIn('<opener>', v2.response['output']['text'])
+        self.assertIn('Hello, my friend', v2.response['output']['text'])
+
+    def test_post_process_checkpoint_consolidates_without_episode(self):
+        def summarize(prompt_base=None, model=None, max_tokens=None, **kw):
+            return json.dumps([]) if prompt_base else 'summary so far'
+        h = self.hooks.make_standard_hooks(checkpoint_volleys=40)
+        v = self.make_volley()
+        v.set_output('a normal reply', None)
+        s = self.make_session(volleys=45, summarize=summarize)
+        h['post_process'](v, s)
+        self.assertEqual(v.local_data['mem_ckpt'], 45)
+        self.time.sleep(0.5)
+        self.assertEqual(v.local_data.get('convo_summary'), 'summary so far')
+        self.assertEqual(MemoryFragment.objects.filter(bank='episodes').count(), 0)
+
+
 class DirectorTests(TestCase):
     def setUp(self):
         import datetime as dt
