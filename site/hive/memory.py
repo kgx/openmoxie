@@ -28,6 +28,10 @@ _TOPIC_MIX = 0.3   # weight of the newest turn in the rolling topic vector
 
 # per-device rolling conversation-topic vectors; in-memory only (rewarms in one turn)
 _topic_vectors = {}
+# per-device recent (monotonic_seconds, vector) samples for dwell detection
+_topic_history = {}
+_TOPIC_HISTORY_MAX = 60
+_DWELL_SIMILARITY = 0.80
 _topic_lock = threading.Lock()
 
 
@@ -60,6 +64,7 @@ def update_topic_vector(device_id, text):
     if not vecs:
         return
     new = vecs[0]
+    import time as _time
     with _topic_lock:
         old = _topic_vectors.get(device_id)
         if old and len(old) == len(new):
@@ -67,11 +72,34 @@ def update_topic_vector(device_id, text):
                                          for o, n in zip(old, new)]
         else:
             _topic_vectors[device_id] = new
+        hist = _topic_history.setdefault(device_id, [])
+        hist.append((_time.monotonic(), _topic_vectors[device_id]))
+        del hist[:-_TOPIC_HISTORY_MAX]
 
 
 def get_topic_vector(device_id):
     with _topic_lock:
         return _topic_vectors.get(device_id)
+
+
+# How long (minutes) the conversation has stayed on its current topic: the age of the
+# oldest consecutive topic sample still similar to the current one. None when unknown.
+def topic_dwell_minutes(device_id):
+    import time as _time
+    with _topic_lock:
+        hist = list(_topic_history.get(device_id, []))
+        current = _topic_vectors.get(device_id)
+    if not current or len(hist) < 2:
+        return None
+    oldest_similar = None
+    for ts, vec in reversed(hist):
+        if len(vec) == len(current) and _cosine(vec, current) >= _DWELL_SIMILARITY:
+            oldest_similar = ts
+        else:
+            break
+    if oldest_similar is None:
+        return 0.0
+    return (_time.monotonic() - oldest_similar) / 60.0
 _WORD_RE = re.compile(r"[a-z0-9']+")
 # words too common to signal relevance
 _STOP = set('the a an and or but so to of in on at for with is are was were be been do does did '

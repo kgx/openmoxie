@@ -456,6 +456,102 @@ class DreamTests(TestCase):
                 os.remove(marker)
 
 
+class DirectorTests(TestCase):
+    def setUp(self):
+        import datetime as dt
+        self.dt = dt
+        from . import director as director_mod
+        self.director = director_mod
+
+    def make_volley(self, director_cfg=None, nickname='George'):
+        from types import SimpleNamespace
+        return SimpleNamespace(config={'child_pii': {'nickname': nickname}},
+                               persist_data={'director': director_cfg or {}},
+                               device_id='d_dir', local_data={})
+
+    def make_session(self, assistant_lines=(), volleys=10):
+        from types import SimpleNamespace
+        hist = [{'role': 'assistant', 'content': l} for l in assistant_lines]
+        return SimpleNamespace(_history=hist, total_volleys=volleys)
+
+    def noon(self):
+        return self.dt.datetime(2026, 7, 30, 12, 0)
+
+    def test_style_rules_always_present_and_configurable(self):
+        out = self.director.build_directives(self.make_volley(), self.make_session(), self.noon())
+        self.assertIn('at most once every few replies', out)
+        cfg = {'style': {'rules': ['Custom rule only.']}}
+        out = self.director.build_directives(self.make_volley(cfg), self.make_session(), self.noon())
+        self.assertIn('Custom rule only.', out)
+        self.assertNotIn('at most once', out)
+
+    def test_directives_can_be_disabled_per_device(self):
+        cfg = {'style': {'enabled': False}, 'repetition': {'enabled': False},
+               'time_of_day': {'enabled': False}, 'session_arc': {'enabled': False},
+               'topic_dwell': {'enabled': False}}
+        out = self.director.build_directives(self.make_volley(cfg), self.make_session(), self.noon())
+        self.assertEqual(out, '')
+
+    def test_repetition_flags_formulaic_replies(self):
+        lines = ['That sounds great, Magic Davey! What next?',
+                 'That sounds amazing, Magic Davey! How fun!',
+                 'That sounds terrific, Magic Davey! Wow!',
+                 'That sounds wonderful, Magic Davey! Neat!']
+        out = self.director.build_directives(self.make_volley(), self.make_session(lines), self.noon())
+        self.assertIn('Quality check', out)
+        self.assertIn('overusing', out)
+        self.assertIn('begin the same way', out)
+
+    def test_repetition_quiet_on_varied_replies(self):
+        lines = ['Whales sing songs across whole oceans.',
+                 'Did you know card fans need dry hands?',
+                 'My circuits are tickled by that joke!']
+        out = self.director.build_directives(self.make_volley(), self.make_session(lines), self.noon())
+        self.assertNotIn('Quality check', out)
+
+    def test_time_of_day_bedtime_and_winddown(self):
+        late = self.dt.datetime(2026, 7, 30, 21, 0)
+        out = self.director.build_directives(self.make_volley(), self.make_session(), late)
+        self.assertIn('past bedtime', out)
+        soon = self.dt.datetime(2026, 7, 30, 19, 45)
+        out = self.director.build_directives(self.make_volley(), self.make_session(), soon)
+        self.assertIn('Bedtime is coming soon', out)
+        custom = {'time_of_day': {'bedtime': '22:00'}}
+        out = self.director.build_directives(self.make_volley(custom), self.make_session(), late)
+        self.assertNotIn('past bedtime', out)
+
+    def test_session_arc_on_long_sessions(self):
+        out = self.director.build_directives(self.make_volley(),
+                                             self.make_session(volleys=150), self.noon())
+        self.assertIn('long chat', out)
+
+    def test_topic_dwell_uses_memory_history(self):
+        import time as t
+        vec = [1.0, 0.0]
+        with memory_mod._topic_lock:
+            memory_mod._topic_vectors['d_dir'] = vec
+            memory_mod._topic_history['d_dir'] = [(t.monotonic() - 15 * 60, vec),
+                                                  (t.monotonic() - 5 * 60, vec),
+                                                  (t.monotonic(), vec)]
+        try:
+            out = self.director.build_directives(self.make_volley(), self.make_session(), self.noon())
+            self.assertIn('same topic for a while', out)
+        finally:
+            with memory_mod._topic_lock:
+                memory_mod._topic_vectors.pop('d_dir', None)
+                memory_mod._topic_history.pop('d_dir', None)
+
+    def test_custom_directive_registration(self):
+        @self.director.directive('magic_test')
+        def magic_test(cfg, volley, session, now):
+            return 'Custom concern injected.'
+        try:
+            out = self.director.build_directives(self.make_volley(), self.make_session(), self.noon())
+            self.assertIn('Custom concern injected.', out)
+        finally:
+            self.director.DIRECTIVES.pop('magic_test', None)
+
+
 class InitDataTests(TestCase):
     def test_factory_data_loads_and_preserves_local_edits(self):
         call_command('init_data')
