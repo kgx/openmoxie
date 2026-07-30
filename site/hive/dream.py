@@ -92,8 +92,7 @@ def run_dream(device_id):
     if not frags:
         return {'decayed': decayed, 'applied': 0}
     dups = duplicate_pairs(frags)
-    prompt = ('You are performing nightly memory maintenance for Moxie, a robot friend of a child '
-              'who is an aspiring magician. ALL MEMORY FRAGMENTS are listed below, one per line as: '
+    prompt = ('You are performing nightly memory maintenance for Moxie, a robot friend of a child. ALL MEMORY FRAGMENTS are listed below, one per line as: '
               'bank | key | confidence | age | text. '
               + ('LIKELY DUPLICATE PAIRS (by embedding similarity): '
                  + '; '.join(f'{a} ~ {b}' for a, b in dups) + '. ' if dups else '')
@@ -104,8 +103,8 @@ def run_dream(device_id):
                 'those episodes. Retire trivial or clearly stale fragments. Correct contradictions, keeping '
                 'the newer information. NEVER modify the objectives bank. Do NOT change fragments that are '
                 'fine as-is. Additionally: ADD up to 3 fresh entries to the "seeds" bank - fun, curiosity-'
-                'sparking conversation ideas the child has NOT heard yet (new tricks to learn, magician '
-                'stories, wow-facts adjacent to his interests), each one sentence, keys like seed:<slug>.'
+                'sparking conversation ideas the child has NOT heard yet (new tricks to learn, character '
+                'stories, wow-facts adjacent to the interests shown in the fragments), each one sentence, keys like seed:<slug>.'
                 '\n\nMEMORY FRAGMENTS:\n' + '\n'.join(lines))
     try:
         raw = _dream_llm(prompt)
