@@ -81,19 +81,42 @@ def consolidate(volley, session, include_episode, guidance=''):
         volley.local_data['convo_summary'] = session.summarize(max_tokens=200)
 
 
+# Opener styles rotate so greetings do not converge on one memory or one shape.
+# Only some styles feature a specific memory; those draw a novelty-weighted anchor
+# (least-recently-surfaced) which is then logged in the habituation ledger.
+OPENER_STYLES = [
+    'Give a warm open greeting and ask how they are doing or what is new. Do not mention any specific memory.',
+    'Ask ONE zoomed-out question about one of their interest areas from the gist below (e.g. "have you learned any new tricks?" or "played with any animals lately?") - no fine details.',
+    'Playfully reference the SPECIFIC MEMORY below and ask a light question about it.',
+    'Share a tiny fun thought, wondering, or gentle joke inspired by the SPECIFIC MEMORY below.',
+    'Suggest exploring or imagining something brand new together today, connected loosely to the gist below.',
+]
+
+
 # Replace the <opener> marker with a freshly generated, memory-aware greeting.
 def generate_opener(volley, session):
+    import random
+
     from django.utils import timezone
+
+    from .memory import assemble_memory, pick_opener_anchor
     hour = timezone.localtime().hour
     part = 'morning' if hour < 12 else ('afternoon' if hour < 18 else 'evening')
     nick = (volley.config.get('child_pii') or {}).get('nickname') or 'your friend'
-    mem = volley.local_data.get('memory_context', '')
-    opener = session.summarize(append_transcript=False, max_tokens=80,
-        prompt_base='You are Moxie, a friendly robot from the Daddy Robotics Laboratory. '
-                    'Write ONE short, warm opening line (under 25 words) to start a chat with '
-                    'your friend ' + nick + '. It is ' + part + '. If natural, reference ONE '
-                    'specific thing from your memories below - vary which. Never use more than '
-                    'one exclamation point.\n\nMEMORIES:\n' + mem)
+    style = random.choice(OPENER_STYLES)
+    anchor = None
+    if 'SPECIFIC MEMORY' in style:
+        anchor = pick_opener_anchor(volley.device_id)
+        if not anchor:
+            style = OPENER_STYLES[0]
+    gist = assemble_memory(volley.device_id, include_details=False)
+    prompt = ('You are Moxie, a friendly robot from the Daddy Robotics Laboratory. '
+              'Write ONE short, warm opening line (under 25 words) to start a chat with '
+              'your friend ' + nick + '. It is ' + part + '. ' + style +
+              ' Never use more than one exclamation point.'
+              + ('\n\nSPECIFIC MEMORY:\n' + anchor if anchor else '')
+              + '\n\nGIST OF WHAT YOU KNOW:\n' + gist)
+    opener = session.summarize(append_transcript=False, max_tokens=80, prompt_base=prompt)
     return opener.strip().strip('"')
 
 

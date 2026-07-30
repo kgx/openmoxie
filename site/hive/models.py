@@ -144,6 +144,10 @@ class MemoryFragment(models.Model):
     times_seen = models.IntegerField(default=1)
     active = models.BooleanField(default=True) # retired fragments are flagged, never deleted
     embedding = models.JSONField(null=True, blank=True)  # 256-dim vector, computed on write
+    # habituation ledger: when this memory was last featured in conversation, so
+    # recently-surfaced memories lose salience instead of being repeated forever
+    last_surfaced = models.DateTimeField(null=True, blank=True)
+    surfaced_count = models.IntegerField(default=0)
     created = models.DateTimeField(auto_now_add=True)
     updated = models.DateTimeField(auto_now=True)
 

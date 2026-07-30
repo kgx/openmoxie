@@ -40,6 +40,7 @@ DEFAULT_CONFIG = {
     'topic_dwell': {'enabled': True, 'minutes': 10},
     'objective': {'enabled': True, 'min_volleys': 6, 'max_volleys': 60},
     'novelty': {'enabled': True, 'min_volleys': 12},
+    'freshness': {'enabled': True, 'hours': 48, 'limit': 5},
 }
 
 
@@ -194,6 +195,20 @@ def novelty_seed(cfg, volley, session, now):
         pass
     return ('When there is a natural lull or the topic goes stale, offer this new idea to '
             'explore together: ' + pick.text)
+
+
+@directive('freshness')
+def freshness(cfg, volley, session, now):
+    # habituation: memories featured recently should rest - zoom out instead
+    from .memory import recently_surfaced
+    items = recently_surfaced(volley.device_id, hours=cfg.get('hours', 48),
+                              limit=cfg.get('limit', 5))
+    if not items:
+        return None
+    listed = '; '.join(t[:60] for t in items)
+    return ('These memories came up recently - do NOT bring them up again unless your friend '
+            'does: ' + listed + '. Prefer fresh topics, other interests, or zoomed-out '
+            'questions (like asking if they have learned anything new).')
 
 
 @directive('topic_dwell')

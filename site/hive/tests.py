@@ -324,6 +324,74 @@ class MemoryEmbeddingTests(TestCase):
         self.assertIn('magic show', ctx)
 
 
+class MemoryHabituationTests(TestCase):
+    def setUp(self):
+        MoxieDevice.objects.create(device_id='d_hab')
+        self._orig_embed = memory_mod._embed_texts
+        memory_mod._embed_texts = lambda texts: [[1.0, 0.0] for _ in texts]
+        apply_memory_ops('d_hab', [
+            {'op': 'add', 'bank': 'gists', 'key': 'gist:magic',
+             'text': 'George is learning several magic tricks'},
+            {'op': 'add', 'bank': 'profile', 'key': 'summary', 'text': 'George, loves magic and bunnies'},
+            {'op': 'add', 'bank': 'magic_tricks', 'key': 'trick:pencil',
+             'text': 'Floating pencil: concealed finger, slow moves', 'confidence': 0.9},
+            {'op': 'add', 'bank': 'magic_tricks', 'key': 'trick:coin',
+             'text': 'Vanishing coin: mastered', 'confidence': 0.9},
+            {'op': 'add', 'bank': 'likes', 'key': 'bunnies',
+             'text': 'Loves animals, especially bunnies', 'confidence': 0.9},
+            {'op': 'add', 'bank': 'likes', 'key': 'blanket',
+             'text': 'Has a treasured blue blanket', 'confidence': 0.9},
+        ])
+
+    def tearDown(self):
+        memory_mod._embed_texts = self._orig_embed
+
+    def test_gists_always_present_details_gated(self):
+        memory_mod._topic_vectors.pop('d_hab', None)
+        ctx = assemble_memory('d_hab', utterance='what should we do today')
+        self.assertIn('learning several magic tricks', ctx)  # gist always
+        detail_count = sum(1 for t in ['Floating pencil', 'Vanishing coin', 'especially bunnies', 'blue blanket']
+                           if t in ctx)
+        self.assertLessEqual(detail_count, memory_mod.ROTATION_SLOTS)  # uncued: rotation only
+
+    def test_cued_detail_appears(self):
+        ctx = assemble_memory('d_hab', utterance='can we practice the floating pencil')
+        self.assertIn('Floating pencil', ctx)
+
+    def test_rotation_habituates_across_calls(self):
+        memory_mod._topic_vectors.pop('d_hab', None)
+        first = assemble_memory('d_hab', utterance='')
+        second = assemble_memory('d_hab', utterance='')
+        firsts = {t for t in ['Floating pencil', 'Vanishing coin', 'especially bunnies', 'blue blanket'] if t in first}
+        seconds = {t for t in ['Floating pencil', 'Vanishing coin', 'especially bunnies', 'blue blanket'] if t in second}
+        self.assertEqual(firsts & seconds, set(), 'rotation must not repeat recently surfaced details')
+        self.assertTrue(MemoryFragment.objects.filter(last_surfaced__isnull=False).count() >= 4)
+
+    def test_opener_anchor_novelty_and_gist_context(self):
+        seen = set()
+        for _ in range(4):
+            a = memory_mod.pick_opener_anchor('d_hab')
+            seen.add(a)
+        self.assertGreaterEqual(len(seen), 3, 'anchors must rotate rather than fixate')
+        gist_only = assemble_memory('d_hab', include_details=False)
+        self.assertIn('learning several magic tricks', gist_only)
+        self.assertNotIn('Floating pencil', gist_only)
+
+    def test_recently_surfaced_and_freshness_directive(self):
+        from types import SimpleNamespace
+
+        from . import director as director_mod
+        memory_mod.pick_opener_anchor('d_hab')
+        items = memory_mod.recently_surfaced('d_hab')
+        self.assertTrue(items)
+        v = SimpleNamespace(config={'child_pii': {'nickname': 'George'}},
+                            persist_data={}, device_id='d_hab', local_data={})
+        s = SimpleNamespace(_history=[], total_volleys=10)
+        import datetime as dt
+        out = director_mod.build_directives(v, s, dt.datetime(2026, 7, 30, 12, 0))
+        self.assertIn('do NOT bring them up again', out)
+
+
 class LoadContentFragmentTests(TestCase):
     def test_fragments_section_seeds_rows(self):
         MoxieDevice.objects.create(device_id='d_seed')

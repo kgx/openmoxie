@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 DREAM_MODEL = 'gpt-5.6-terra'
 DREAM_HOUR = 3               # local time (settings.TIME_ZONE)
-CORE_BANKS = ('profile', 'magic_tricks', 'objectives')  # objectives are parent-authored: never decay
+CORE_BANKS = ('profile', 'gists', 'objectives')  # parent-authored/summary banks: never decay
 SEEDS_MAX = 8
 DECAY_AFTER_DAYS = 45
 DUP_THRESHOLD = 0.88
@@ -102,9 +102,14 @@ def run_dream(device_id):
                 'Distill episodes older than two weeks into durable facts in the right banks, then retire '
                 'those episodes. Retire trivial or clearly stale fragments. Correct contradictions, keeping '
                 'the newer information. NEVER modify the objectives bank. Do NOT change fragments that are '
-                'fine as-is. Additionally: ADD up to 3 fresh entries to the "seeds" bank - fun, curiosity-'
-                'sparking conversation ideas the child has NOT heard yet (new tricks to learn, character '
-                'stories, wow-facts adjacent to the interests shown in the fragments), each one sentence, keys like seed:<slug>.'
+                'fine as-is. Additionally: (1) MAINTAIN the "gists" bank - one short zoomed-out summary '
+                'per interest area (keys like gist:magic, gist:animals, gist:comfort), each a single '
+                'sentence capturing the big picture of that area WITHOUT fine details; add or update '
+                'gists so they reflect the current detail fragments, spanning ALL of the child\'s '
+                'interest areas, not just the largest one. (2) ADD up to 3 fresh entries to the "seeds" '
+                'bank - fun, curiosity-sparking conversation ideas the child has NOT heard yet, spread '
+                'across DIFFERENT interest areas (never all about one topic), each one sentence, keys '
+                'like seed:<slug>.'
                 '\n\nMEMORY FRAGMENTS:\n' + '\n'.join(lines))
     try:
         raw = _dream_llm(prompt)
