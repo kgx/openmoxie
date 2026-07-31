@@ -889,6 +889,75 @@ class SessionPersistenceTests(TestCase):
         self.assertEqual(self.ChatSessionState.objects.first().session_id, 'B/y')
 
 
+class SttLexiconTests(TestCase):
+    def test_lexicon_built_from_fragment_keys(self):
+        MoxieDevice.objects.create(device_id='d_lex')
+        orig = memory_mod._embed_texts
+        memory_mod._embed_texts = lambda texts: None
+        try:
+            apply_memory_ops('d_lex', [
+                {'op': 'add', 'bank': 'likes', 'key': 'stuffy:knuffle-bunny', 'text': 'x'},
+                {'op': 'add', 'bank': 'people', 'key': 'pet:fuzbert', 'text': 'x'},
+                {'op': 'add', 'bank': 'likes', 'key': 'twirlies', 'text': 'x'},
+                {'op': 'add', 'bank': 'episodes', 'key': 'ep:12345', 'text': 'x'},
+            ])
+        finally:
+            memory_mod._embed_texts = orig
+        memory_mod._lexicon_cache.clear()
+        lex = memory_mod.stt_lexicon('d_lex')
+        self.assertIn('Knuffle Bunny', lex)
+        self.assertIn('Fuzbert', lex)
+        self.assertIn('Twirlies', lex)
+        self.assertNotIn('12345', lex)  # episodes bank excluded
+
+
+class SttHandlerTests(TestCase):
+    def test_perform_biases_falls_back_and_stamps_pcm_duration(self):
+        from types import SimpleNamespace
+
+        from .mqtt import zmq_stt_handler as zh
+        captured = []
+        class FakeTranscriptions:
+            def create(self, **kw):
+                captured.append(kw)
+                if kw['model'] == zh.OPENAI_MODEL:
+                    raise RuntimeError('primary rejected')
+                return SimpleNamespace(text='hello moxie')
+        fake_client = SimpleNamespace(audio=SimpleNamespace(transcriptions=FakeTranscriptions()))
+        orig = zh.create_openai
+        zh.create_openai = lambda: fake_client
+        replies = []
+        parent = SimpleNamespace(bias_prompt=lambda d: 'Vocabulary: Fuzbert, Twirlies.',
+                                 zmq_reply=lambda d, r: replies.append(r))
+        try:
+            sess = zh.STTSession(parent, 'd_x', 'u1')
+            sess.on_request(SimpleNamespace(timestamp=1000, audio_content=b'\x00' * 32000))  # 1s PCM
+            sess.perform()
+        finally:
+            zh.create_openai = orig
+        r = replies[0]
+        self.assertEqual(r.speech, 'hello moxie')
+        self.assertEqual(r.start_timestamp, 1000)
+        self.assertEqual(r.end_timestamp, 2000)
+        self.assertIn('Fuzbert', captured[0]['prompt'])
+        self.assertEqual(captured[-1]['model'], zh.FALLBACK_MODEL)
+
+    def test_bias_prompt_combines_nickname_and_lexicon(self):
+        from types import SimpleNamespace
+
+        from .mqtt.zmq_stt_handler import STTHandler
+        MoxieDevice.objects.create(device_id='d_lex2')
+        rd = SimpleNamespace(get_config=lambda d: {'child_pii': {'nickname': 'George'}})
+        h = STTHandler(SimpleNamespace(robot_data=lambda: rd))
+        memory_mod._lexicon_cache['d_lex2'] = (float('inf'), 'Knuffle Bunny, Twirlies')
+        try:
+            p = h.bias_prompt('d_lex2')
+        finally:
+            memory_mod._lexicon_cache.pop('d_lex2', None)
+        self.assertIn('George', p)
+        self.assertIn('Knuffle Bunny', p)
+
+
 class InitDataTests(TestCase):
     def test_factory_data_loads_and_preserves_local_edits(self):
         call_command('init_data')

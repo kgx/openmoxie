@@ -330,6 +330,46 @@ def _pick_anchor_atomic(device_id):
     return pick.text
 
 
+_LEXICON_BANKS = ('likes', 'people', 'magic_tricks', 'places')
+_lexicon_cache = {}   # device_id -> (monotonic_ts, text)
+_LEXICON_TTL = 300
+
+
+def _humanize_key(key):
+    part = key.split(':', 1)[-1].replace('-', ' ').replace('_', ' ').strip()
+    return part.title()
+
+
+def _lexicon_atomic(device_id):
+    keys = MemoryFragment.objects.filter(device__device_id=device_id, active=True,
+                                         bank__in=_LEXICON_BANKS).values_list('key', flat=True)
+    words, seen = [], set()
+    for k in keys:
+        h = _humanize_key(k)
+        if h and h.lower() not in seen:
+            seen.add(h.lower())
+            words.append(h)
+    return words[:30]
+
+
+# The child's personal vocabulary (stuffed animal names, pets, tricks, places) drawn
+# from memory fragments - used to bias STT so 'Knuffle Bunny' and 'twirlies' transcribe
+# correctly. Cached briefly; safe from worker threads.
+def stt_lexicon(device_id):
+    import time as _time
+    now = _time.monotonic()
+    hit = _lexicon_cache.get(device_id)
+    if hit and now - hit[0] < _LEXICON_TTL:
+        return hit[1]
+    try:
+        text = ', '.join(run_db_atomic(_lexicon_atomic, device_id))
+    except Exception as e:
+        logger.warning(f'stt_lexicon failed: {e}')
+        return hit[1] if hit else ''
+    _lexicon_cache[device_id] = (now, text)
+    return text
+
+
 # Choose one detail memory to feature (e.g. in an opener), novelty-weighted:
 # random among the least-recently-surfaced few, then marked as surfaced.
 def pick_opener_anchor(device_id):
