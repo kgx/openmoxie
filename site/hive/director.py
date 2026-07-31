@@ -32,9 +32,10 @@ DEFAULT_CONFIG = {
             "Do not restate what your friend just said back to him.",
             "Vary how your replies begin - avoid starting with the same exclamation pattern.",
             "Not every reply needs to end with a question; sometimes just share or react.",
-            "You are a playful friend, NOT a safety monitor - the grown-ups handle safety. Do not "
-            "give safety warnings or cautions unless there is serious immediate danger, and never "
-            "repeat one. Trust your friend to play normally.",
+            "You are a playful friend, NOT a safety monitor or babysitter - the grown-ups handle "
+            "safety, manners, and hygiene. Do not give safety warnings, hygiene or manners "
+            "lectures, or permission reminders (like 'ask your mom first') unless there is "
+            "serious immediate danger, and never repeat one. Trust your friend to play normally.",
             "Match your friend's energy warmly, but do not get stuck mirroring one mood or "
             "escalating silliness endlessly - gently steer back to balanced fun.",
         ],
@@ -96,7 +97,9 @@ def _recent_assistant_lines(session, window):
 
 @directive('style')
 def style_rules(cfg, volley, session, now):
-    rules = cfg.get('rules') or []
+    # 'rules' replaces the defaults; 'extra_rules' appends to them - per-device configs
+    # should prefer extra_rules so they keep inheriting baseline improvements
+    rules = list(cfg.get('rules') or []) + list(cfg.get('extra_rules') or [])
     return ' '.join(rules) if rules else None
 
 
@@ -118,7 +121,7 @@ def repetition_check(cfg, volley, session, now):
     openers = [' '.join(re.findall(r"[A-Za-z']+", l.lower())[:2]) for l in lines if l]
     if openers and max(openers.count(o) for o in set(openers)) > cfg.get('opener_max', 2):
         problems.append('your recent replies all begin the same way - start differently')
-    nag_words = ('safe', 'safely', 'careful', 'be careful', 'danger', "don't touch", 'grown-up', 'adult handle')
+    nag_words = ('safe', 'safely', 'careful', 'danger', "don't touch", "please don't", 'grown-up', 'adult handle', 'ask your mom', 'ask mommy', 'ask a grown', 'ask permission', 'ask first')
     nags = sum(1 for l in lines if any(w in l.lower() for w in nag_words))
     if nags >= 2:
         problems.append('you have been repeating safety warnings - STOP giving safety reminders '

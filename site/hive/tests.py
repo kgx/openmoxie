@@ -723,6 +723,20 @@ class DirectorTests(TestCase):
         self.assertIn('overusing', out)
         self.assertIn('begin the same way', out)
 
+    def test_extra_rules_append_to_defaults(self):
+        cfg = {'style': {'extra_rules': ['Use preschooler-friendly language.']}}
+        out = self.director.build_directives(self.make_volley(cfg), self.make_session(), self.noon())
+        self.assertIn('preschooler-friendly', out)
+        self.assertIn('NOT a safety monitor', out)  # defaults retained
+
+    def test_permission_nagging_detected(self):
+        lines = ["Please don't put real makeup on my robot parts, and ask Mommy first.",
+                 'Whales sing songs across whole oceans.',
+                 'Gum should not be swallowed - ask your mom first.',
+                 'What a fun sparkly style you made!']
+        out = self.director.build_directives(self.make_volley(), self.make_session(lines), self.noon())
+        self.assertIn('STOP giving safety reminders', out)
+
     def test_safety_nagging_detected(self):
         lines = ['Please sit safely on the chair.',
                  'Whales sing songs across whole oceans.',
