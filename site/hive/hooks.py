@@ -55,7 +55,12 @@ def consolidate(volley, session, include_episode, guidance=''):
               '"key": str, "text": str, "confidence": float}]. Banks: ' + BANKS + '. '
               'Keys are short stable slugs (e.g. trick:french-drop, person:sam). Use update to '
               'revise an existing key, add for new memories, retire for facts that are now wrong '
-              'or obsolete. Record what HAPPENED, neutrally - NEVER store advice, warnings, or safety reminders that Moxie gave as memories. Only store things the child said, did, or clearly confirmed with real enthusiasm - never topics Moxie itself introduced that got only polite agreement. ' + (guidance + ' ' if guidance else '') +
+              'or obsolete. Record what HAPPENED, neutrally - NEVER store advice, warnings, or safety '
+              'reminders that Moxie gave as memories. Events inside pretend play, roleplay, or stories '
+              'are FICTION - never store them as real facts about the child; at most store that the '
+              'child enjoyed the game or character. Only store things the child said, did, or clearly '
+              'confirmed with real enthusiasm - never topics Moxie itself introduced that got only '
+              'polite agreement. ' + (guidance + ' ' if guidance else '') +
               'Only emit operations for real changes; an empty array is fine.'
               '\n\nCURRENT MEMORY FRAGMENTS:\n' + (frags or '(none yet)'))
     raw = session.summarize(model=CONSOLIDATION_MODEL, prompt_base=prompt, max_tokens=2000)
