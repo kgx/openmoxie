@@ -1051,6 +1051,21 @@ class SttHandlerTests(TestCase):
         self.assertIn('Knuffle Bunny', p)
 
 
+class HealthPageTests(TestCase):
+    def test_health_page_renders_with_data(self):
+        from django.urls import reverse
+        d = MoxieDevice.objects.create(device_id='d_h', name='Moxie1',
+                                       state={'battery_level': 0.5, 'wifi_ssid': 'TestNet'},
+                                       robot_settings={'props': {'stt': '4'}})
+        ChatTranscript.objects.create(device=d, role='user', text='hi')
+        r = self.client.get(reverse('hive:health'))
+        self.assertEqual(r.status_code, 200)
+        body = r.content.decode()
+        self.assertIn('Moxie1', body)
+        self.assertIn('server (live)', body)
+        self.assertIn('TestNet', body)
+
+
 class InitDataTests(TestCase):
     def test_factory_data_loads_and_preserves_local_edits(self):
         call_command('init_data')

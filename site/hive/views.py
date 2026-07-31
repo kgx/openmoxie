@@ -415,3 +415,65 @@ class MoxieDataView(generic.DetailView):
         context['active_config'] = json.dumps(get_instance().robot_data().get_config_for_device(self.object))
         context['persist_data'] = json.dumps(get_instance().robot_data().get_persist_for_device(self.object))
         return context
+
+class HealthView(generic.TemplateView):
+    template_name = 'hive/health.html'
+
+    def get_context_data(self, **kwargs):
+        import glob
+        import json as js
+        import os
+        import re
+
+        from django.conf import settings as dj_settings
+        from django.utils import timezone as djtz
+
+        from .models import ChatSessionState, ChatTranscript, MemoryFragment, MoxieDevice
+        context = super().get_context_data(**kwargs)
+        robots, name_by_devid = [], {}
+        for d in MoxieDevice.objects.filter(name__isnull=False).order_by('name'):
+            state = d.state or {}
+            props = (d.robot_settings or {}).get('props', {})
+            online = d.last_disconnect is None or (d.last_connect and d.last_connect > d.last_disconnect)
+            name_by_devid[d.device_id] = d.name
+            today = ChatTranscript.objects.filter(device=d, timestamp__date=djtz.localdate())
+            frags = MemoryFragment.objects.filter(device=d, active=True)
+            robots.append({
+                'name': d.name, 'pk': d.pk, 'online': online, 'last_seen': d.last_connect,
+                'battery': state.get('battery_level'), 'wifi': state.get('wifi_ssid'),
+                'stt': props.get('stt', '0'), 'schedule': d.schedule.name if d.schedule else None,
+                'lines_today': today.count(),
+                'child_lines_today': today.filter(role='user').count(),
+                'fragments': frags.count(), 'seeds': frags.filter(bank='seeds').count(),
+                'session': ChatSessionState.objects.filter(device=d).first(),
+            })
+        context['robots'] = robots
+        try:
+            from .mqtt.moxie_server import get_instance
+            inst = get_instance()
+            context['broker'] = getattr(inst, '_client_metrics', None) if inst else None
+        except Exception:
+            context['broker'] = None
+        context['dream'] = None
+        try:
+            reports = sorted(glob.glob(os.path.join(str(dj_settings.DATA_STORE_DIR), 'reports', 'dream-*.json')))
+            if reports:
+                rep = js.load(open(reports[-1]))
+                drift = [{'robot': name_by_devid.get(dev, dev), **f}
+                         for dev, res in rep.items() for f in res.get('drift', [])]
+                context['dream'] = {'file': os.path.basename(reports[-1]), 'results': rep, 'drift': drift}
+        except Exception:
+            pass
+        issues = []
+        try:
+            log_path = os.path.join(str(dj_settings.DATA_STORE_DIR), 'debug.log')
+            with open(log_path, 'rb') as f:
+                f.seek(0, 2)
+                f.seek(max(0, f.tell() - 200_000))
+                lines = f.read().decode(errors='replace').splitlines()
+            noise = re.compile(r'ASSETBUNDLE|LizardError|BEHAVIOR_ERROR|ROBOTACTOR')
+            issues = [l for l in lines if ('WARNING' in l or 'ERROR' in l) and not noise.search(l)][-10:]
+        except Exception:
+            pass
+        context['issues'] = issues
+        return context

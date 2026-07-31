@@ -1,0 +1,46 @@
+{% extends 'base.html' %}
+{% load static %}
+{% block content %}
+<meta http-equiv="refresh" content="30">
+<div class="moxheader"><a href="{% url 'hive:dashboard' %}"><img class="moximage" src="{% static 'hive/openmoxie_logo.svg' %}"></a>Health<span class="moxversion">{{moxie_version}}</span></div>
+<div class="p-3">
+<h2>Robots</h2>
+<table class="table table-striped">
+  <tr><th>Robot</th><th>Status</th><th>Battery</th><th>WiFi</th><th>STT</th><th>Schedule</th><th>Today</th><th>Memory</th><th>Live Session</th></tr>
+  {% for r in robots %}
+  <tr>
+    <td><a href="{% url 'hive:moxie' r.pk %}">{{ r.name }}</a></td>
+    <td>{% if r.online %}<span class="badge text-bg-success">Online</span>{% else %}<span class="badge text-bg-secondary">Offline</span> {{ r.last_seen|timesince }} ago{% endif %}</td>
+    <td>{% if r.battery is not None %}{% widthratio r.battery 1 100 %}%{% else %}?{% endif %}</td>
+    <td>{{ r.wifi|default:"?" }}</td>
+    <td>{% if r.stt == "4" %}<span class="badge text-bg-info">server (live)</span>{% else %}<span class="badge text-bg-light">google</span>{% endif %}</td>
+    <td>{{ r.schedule }}</td>
+    <td>{{ r.lines_today }} lines ({{ r.child_lines_today }} child)</td>
+    <td>{{ r.fragments }} fragments, {{ r.seeds }} seeds</td>
+    <td>{% if r.session %}{{ r.session.session_id }} · {{ r.session.total_volleys }} volleys · {{ r.session.updated|timesince }} ago{% else %}-{% endif %}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% if broker %}<p class="text-muted">MQTT broker: {{ broker.connected }} connected / {{ broker.total }} total clients</p>{% endif %}
+
+<h2>Last Dream {% if dream %}<small class="text-muted">{{ dream.file }}</small>{% endif %}</h2>
+{% if dream %}
+  <table class="table table-sm">
+    <tr><th>Device</th><th>Result</th></tr>
+    {% for dev, res in dream.results.items %}<tr><td><code>{{ dev|truncatechars:16 }}</code></td><td><code>{{ res }}</code></td></tr>{% endfor %}
+  </table>
+  {% if dream.drift %}
+  <h5>Drift findings</h5>
+  <table class="table table-sm table-warning">
+    <tr><th>Robot</th><th>Fragment</th><th>Issue</th></tr>
+    {% for f in dream.drift %}<tr><td>{{ f.robot }}</td><td><code>{{ f.bank }}/{{ f.key }}</code></td><td>{{ f.issue }}</td></tr>{% endfor %}
+  </table>
+  {% else %}<p><span class="badge text-bg-success">memory healthy</span> no drift findings</p>{% endif %}
+{% else %}<p class="text-muted">no dream report yet</p>{% endif %}
+
+<h2>Recent Issues</h2>
+{% if issues %}<pre class="small bg-light p-2">{% for l in issues %}{{ l }}
+{% endfor %}</pre>{% else %}<p><span class="badge text-bg-success">clean</span> no recent warnings or errors</p>{% endif %}
+<p class="text-muted small">auto-refreshes every 30s</p>
+</div>
+{% endblock %}
