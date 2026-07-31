@@ -55,15 +55,19 @@ class LiveStream:
         self._done = False
         self._ws = websocket.create_connection(
             STREAM_URL,
-            header=[f'Authorization: Bearer {get_openai_key()}', 'OpenAI-Beta: realtime=v1'],
+            header=[f'Authorization: Bearer {get_openai_key()}'],
             timeout=5)
+        # GA protocol shape (probed live 2026-07-31): session.type=transcription with
+        # nested audio.input config; turn_detection off - the robot's VAD decides EOS
         self._ws.send(json.dumps({
-            'type': 'transcription_session.update',
+            'type': 'session.update',
             'session': {
-                'input_audio_format': 'pcm16',
-                'input_audio_transcription': {'model': STREAM_MODEL, 'prompt': prompt},
-                'turn_detection': None,   # the robot's VAD decides; we commit at its EOS
-            }}))
+                'type': 'transcription',
+                'audio': {'input': {
+                    'format': {'type': 'audio/pcm', 'rate': 24000},
+                    'transcription': {'model': STREAM_MODEL, 'prompt': prompt},
+                    'turn_detection': None,
+                }}}}))
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
         self._reader.start()
 
