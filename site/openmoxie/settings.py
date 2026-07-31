@@ -94,6 +94,14 @@ DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.sqlite3',
         'NAME': DATA_STORE_DIR / 'db.sqlite3',
+        'OPTIONS': {
+            # many worker threads write concurrently (transcripts, session state,
+            # memory surfacing) - WAL + generous busy timeout prevents 'database
+            # is locked' storms; IMMEDIATE avoids deferred-lock upgrade deadlocks
+            'timeout': 20,
+            'transaction_mode': 'IMMEDIATE',
+            'init_command': 'PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=20000;',
+        },
     }
 }
 

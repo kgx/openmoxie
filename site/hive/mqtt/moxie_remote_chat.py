@@ -44,6 +44,7 @@ class RemoteChat:
     def __init__(self, server):
         self._server = server
         self._device_sessions = {}
+        self._last_session_save = {}
         self._modules = { }
         self._modules_info = { "modules": [], "version": "openmoxie_v1" }
         self._worker_queue = concurrent.futures.ThreadPoolExecutor(max_workers=_MAX_WORKER_THREADS)
@@ -125,9 +126,15 @@ class RemoteChat:
         return new_session['session']
 
     # Snapshot the device's live session to the DB (runs on worker pool) so a server
-    # restart mid-conversation resumes instead of forgetting
+    # restart mid-conversation resumes instead of forgetting. Throttled per device -
+    # notify records arrive in bursts and one snapshot per second is plenty.
     def save_session_state(self, device_id):
         try:
+            import time as _time
+            now = _time.monotonic()
+            if now - self._last_session_save.get(device_id, 0) < 1.0:
+                return
+            self._last_session_save[device_id] = now
             rec = self._device_sessions.get(device_id)
             if not rec:
                 return

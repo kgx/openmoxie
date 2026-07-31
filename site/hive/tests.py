@@ -880,10 +880,13 @@ class SessionPersistenceTests(TestCase):
         self.rc.restore_session_state('d_sess', 'OPENMOXIE_CHAT/memory3', stale)
         self.assertEqual(stale._total_volleys, 0)
 
-    def test_save_overwrites_single_row_per_device(self):
+    def test_save_overwrites_single_row_per_device_and_throttles(self):
         self.rc._device_sessions['d_sess'] = {'id': 'A/x', 'session': self.live_session()}
         self.rc.save_session_state('d_sess')
         self.rc._device_sessions['d_sess'] = {'id': 'B/y', 'session': self.live_session()}
+        self.rc.save_session_state('d_sess')   # throttled: within 1s of the last save
+        self.assertEqual(self.ChatSessionState.objects.first().session_id, 'A/x')
+        self.rc._last_session_save.clear()     # throttle window elapsed
         self.rc.save_session_state('d_sess')
         self.assertEqual(self.ChatSessionState.objects.count(), 1)
         self.assertEqual(self.ChatSessionState.objects.first().session_id, 'B/y')
