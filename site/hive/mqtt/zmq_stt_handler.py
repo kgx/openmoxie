@@ -2,20 +2,101 @@ from .moxie_zmq_handler import ZMQHandler
 from .protos.embodied.perception.audio.zmqSTT_pb2 import zmqSTTRequest,zmqSTTResponse
 import soundfile as sf
 import numpy as np
+import base64
 import io
+import json
+import queue
+import threading
 import time
 import logging
 import concurrent.futures
-from .ai_factory import create_openai
+from .ai_factory import create_openai, get_openai_key
 
 LOG_WAV=False
 OPENAI_MODEL='gpt-transcribe'      # OpenAI's recommended transcription model (July 2026)
 FALLBACK_MODEL='whisper-1'         # battle-tested fallback if the primary rejects a request
 
+# Streaming mode: transcribe DURING speech via gpt-live-transcribe over WebSocket,
+# sending PARTIAL results to the robot as deltas arrive and FINAL right after
+# end-of-speech. Audio is always buffered in parallel; any streaming failure or a
+# missed final falls back to the batch path above, so streaming can never be worse.
+STT_STREAMING=True
+STREAM_MODEL='gpt-live-transcribe'
+STREAM_URL='wss://api.openai.com/v1/realtime?intent=transcription'
+STREAM_FINAL_TIMEOUT=2.5           # seconds after EOS before batch fallback
+PARTIAL_MIN_INTERVAL=0.3           # throttle PARTIAL responses to the robot
+
 logger = logging.getLogger(__name__)
 
 def now_ms():
     return time.time_ns() // 1_000_000
+
+
+def resample_16k_to_24k(pcm_bytes):
+    # linear interpolation 16kHz -> 24kHz mono int16 (the realtime API's expected rate)
+    samples = np.frombuffer(pcm_bytes, dtype=np.int16)
+    if len(samples) == 0:
+        return b''
+    idx = np.linspace(0, len(samples) - 1, int(len(samples) * 1.5))
+    return np.interp(idx, np.arange(len(samples)), samples).astype(np.int16).tobytes()
+
+
+'''
+A thin synchronous client for the realtime transcription WebSocket. One instance per
+utterance. Tolerant event parsing: any *.delta event extends the running transcript,
+any *completed/*done transcription event finalizes it.
+'''
+class LiveStream:
+    def __init__(self, prompt, on_partial, on_final):
+        import websocket
+        self._on_partial = on_partial
+        self._on_final = on_final
+        self._accum = ''
+        self._done = False
+        self._ws = websocket.create_connection(
+            STREAM_URL,
+            header=[f'Authorization: Bearer {get_openai_key()}', 'OpenAI-Beta: realtime=v1'],
+            timeout=5)
+        self._ws.send(json.dumps({
+            'type': 'transcription_session.update',
+            'session': {
+                'input_audio_format': 'pcm16',
+                'input_audio_transcription': {'model': STREAM_MODEL, 'prompt': prompt},
+                'turn_detection': None,   # the robot's VAD decides; we commit at its EOS
+            }}))
+        self._reader = threading.Thread(target=self._read_loop, daemon=True)
+        self._reader.start()
+
+    def send_audio(self, pcm_16k_bytes):
+        audio = base64.b64encode(resample_16k_to_24k(pcm_16k_bytes)).decode()
+        self._ws.send(json.dumps({'type': 'input_audio_buffer.append', 'audio': audio}))
+
+    def commit(self):
+        self._ws.send(json.dumps({'type': 'input_audio_buffer.commit'}))
+
+    def close(self):
+        try:
+            self._ws.close()
+        except Exception:
+            pass
+
+    def _read_loop(self):
+        try:
+            while not self._done:
+                evt = json.loads(self._ws.recv())
+                etype = evt.get('type', '')
+                if etype.endswith('.delta') and 'transcription' in etype:
+                    self._accum += evt.get('delta', '')
+                    self._on_partial(self._accum)
+                elif ('transcription' in etype and
+                      (etype.endswith('.completed') or etype.endswith('.done'))):
+                    self._done = True
+                    self._on_final(evt.get('transcript') or self._accum)
+                elif etype == 'error':
+                    logger.warning(f'LiveStream error event: {evt}')
+        except Exception as e:
+            if not self._done:
+                logger.debug(f'LiveStream reader ended: {e}')
 
 
 '''
@@ -24,21 +105,91 @@ is a very simple implementation tuned to OpenAI Whisper.  Their API doesn't supp
 accumulate the audio frames, then transcribe them when complete.
 '''
 class STTSession:
-    def __init__(self, parent, device_id, session_id):
+    def __init__(self, parent, device_id, session_id, streaming=None):
         self._parent = parent
         self._device_id = device_id
         self._session_id = session_id
         self._stream_bytes = bytearray()
         self._start_ts = None
+        self._streaming = STT_STREAMING if streaming is None else streaming
+        self._chunk_queue = queue.Queue()
+        self._live_started = False
+        self._live = None
+        self._live_failed = False
+        self._final_text = None
+        self._final_evt = threading.Event()
+        self._last_partial = 0.0
 
     def on_request(self, req):
         # future ref, this is technically wrong in the design, this ts is realtime on robot, not audio timestamp
         if not self._start_ts:
             self._start_ts = req.timestamp
-        self._stream_bytes += req.audio_content
+        self._stream_bytes += req.audio_content   # always buffered: the fallback source
+        if self._streaming and req.audio_content:
+            self._chunk_queue.put(bytes(req.audio_content))
+            if not self._live_started:
+                self._live_started = True
+                self._parent.submit_stream_worker(self._stream_worker)
         return len(self._stream_bytes)
-    
+
+    # runs on its own worker thread: connect, forward chunks, commit at EOS sentinel
+    def _stream_worker(self):
+        try:
+            self._live = LiveStream(self._parent.bias_prompt(self._device_id),
+                                    self._on_partial, self._on_final)
+        except Exception as e:
+            logger.warning(f'LiveStream connect failed ({e}); will use batch fallback')
+            self._live_failed = True
+            return
+        try:
+            while True:
+                chunk = self._chunk_queue.get()
+                if chunk is None:
+                    self._live.commit()
+                    return
+                self._live.send_audio(chunk)
+        except Exception as e:
+            logger.warning(f'LiveStream send failed ({e}); will use batch fallback')
+            self._live_failed = True
+            self._live.close()
+
+    def _on_partial(self, text):
+        now = time.monotonic()
+        if now - self._last_partial < PARTIAL_MIN_INTERVAL:
+            return
+        self._last_partial = now
+        resp = zmqSTTResponse()
+        resp.uuid = self._session_id
+        resp.type = resp.ResponseType.PARTIAL
+        resp.timestamp = now_ms()
+        resp.speech = text
+        self._parent.zmq_reply(self._device_id, resp)
+
+    def _on_final(self, text):
+        self._final_text = text
+        self._final_evt.set()
+
     def perform(self):
+        # streaming first: EOS sentinel -> await the live final briefly; fall back to batch
+        if self._streaming and self._live_started and not self._live_failed:
+            self._chunk_queue.put(None)
+            if self._final_evt.wait(timeout=STREAM_FINAL_TIMEOUT) and self._final_text is not None:
+                resp = zmqSTTResponse()
+                resp.uuid = self._session_id
+                resp.type = resp.ResponseType.FINAL
+                resp.timestamp = now_ms()
+                resp.speech = self._final_text
+                duration_ms = len(self._stream_bytes) // 32
+                resp.start_timestamp = self._start_ts or now_ms()
+                resp.end_timestamp = resp.start_timestamp + duration_ms
+                logger.info(f'STT-LIVE-FINAL: {self._final_text}')
+                self._parent.zmq_reply(self._device_id, resp)
+                if self._live:
+                    self._live.close()
+                return
+            logger.warning('LiveStream final missed the deadline; using batch fallback')
+            if self._live:
+                self._live.close()
         logger.info(f'Processing session_id {self._session_id} with {len(self._stream_bytes)} bytes')
         buffer = io.BytesIO()
         sf.write(
@@ -104,6 +255,10 @@ class STTHandler(ZMQHandler):
         super().__init__(server)
         self._sessions = {}
         self._worker_queue = concurrent.futures.ThreadPoolExecutor(max_workers=5)
+        self._stream_workers = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+
+    def submit_stream_worker(self, fn):
+        self._stream_workers.submit(fn)
 
     # Context biasing: the child's name plus their personal vocabulary from memory
     # fragments (stuffed animals, pets, tricks) - benchmarks show this is the largest

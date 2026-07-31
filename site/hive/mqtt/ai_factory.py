@@ -12,3 +12,6 @@ def set_openai_key(key):
 def create_openai():
     global _OPENAPI_KEY
     return OpenAI(api_key=_OPENAPI_KEY)
+
+def get_openai_key():
+    return _OPENAPI_KEY

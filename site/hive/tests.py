@@ -930,7 +930,7 @@ class SttHandlerTests(TestCase):
         parent = SimpleNamespace(bias_prompt=lambda d: 'Vocabulary: Fuzbert, Twirlies.',
                                  zmq_reply=lambda d, r: replies.append(r))
         try:
-            sess = zh.STTSession(parent, 'd_x', 'u1')
+            sess = zh.STTSession(parent, 'd_x', 'u1', streaming=False)
             sess.on_request(SimpleNamespace(timestamp=1000, audio_content=b'\x00' * 32000))  # 1s PCM
             sess.perform()
         finally:
@@ -941,6 +941,78 @@ class SttHandlerTests(TestCase):
         self.assertEqual(r.end_timestamp, 2000)
         self.assertIn('Fuzbert', captured[0]['prompt'])
         self.assertEqual(captured[-1]['model'], zh.FALLBACK_MODEL)
+
+    def test_streaming_sends_partials_and_final_from_live_transcript(self):
+        import threading
+        from types import SimpleNamespace
+
+        from .mqtt import zmq_stt_handler as zh
+        class FakeLive:
+            def __init__(self, prompt, on_partial, on_final):
+                self.on_partial, self.on_final = on_partial, on_final
+                self.prompt = prompt
+            def send_audio(self, b):
+                self.on_partial('hello')
+            def commit(self):
+                self.on_final('hello moxie live')
+            def close(self):
+                pass
+        replies = []
+        parent = SimpleNamespace(
+            bias_prompt=lambda d: 'Vocabulary: Fuzbert.',
+            zmq_reply=lambda d, r: replies.append(r),
+            submit_stream_worker=lambda fn: threading.Thread(target=fn, daemon=True).start())
+        orig = zh.LiveStream
+        zh.LiveStream = FakeLive
+        try:
+            sess = zh.STTSession(parent, 'd_x', 'u2', streaming=True)
+            sess.on_request(SimpleNamespace(timestamp=5000, audio_content=b'\x00' * 32000))
+            sess.perform()
+        finally:
+            zh.LiveStream = orig
+        types = [r.type for r in replies]
+        self.assertIn(zh.zmqSTTResponse.ResponseType.PARTIAL, types)
+        final = replies[-1]
+        self.assertEqual(final.type, zh.zmqSTTResponse.ResponseType.FINAL)
+        self.assertEqual(final.speech, 'hello moxie live')
+        self.assertEqual(final.start_timestamp, 5000)
+        self.assertEqual(final.end_timestamp, 6000)
+
+    def test_streaming_connect_failure_falls_back_to_batch(self):
+        import threading
+        from types import SimpleNamespace
+
+        from .mqtt import zmq_stt_handler as zh
+        class DeadLive:
+            def __init__(self, *a, **kw):
+                raise RuntimeError('no websocket for you')
+        class FakeTranscriptions:
+            def create(self, **kw):
+                return SimpleNamespace(text='batch rescue')
+        replies = []
+        parent = SimpleNamespace(
+            bias_prompt=lambda d: 'x',
+            zmq_reply=lambda d, r: replies.append(r),
+            submit_stream_worker=lambda fn: threading.Thread(target=fn, daemon=True).start())
+        orig_live, orig_client = zh.LiveStream, zh.create_openai
+        zh.LiveStream = DeadLive
+        zh.create_openai = lambda: SimpleNamespace(
+            audio=SimpleNamespace(transcriptions=FakeTranscriptions()))
+        try:
+            sess = zh.STTSession(parent, 'd_x', 'u3', streaming=True)
+            sess.on_request(SimpleNamespace(timestamp=1000, audio_content=b'\x00' * 3200))
+            import time as t
+            t.sleep(0.2)   # let the doomed connect thread mark failure
+            sess.perform()
+        finally:
+            zh.LiveStream, zh.create_openai = orig_live, orig_client
+        self.assertEqual(replies[-1].speech, 'batch rescue')
+        self.assertEqual(replies[-1].type, zh.zmqSTTResponse.ResponseType.FINAL)
+
+    def test_resample_ratio(self):
+        from .mqtt.zmq_stt_handler import resample_16k_to_24k
+        out = resample_16k_to_24k(b'\x00\x00' * 1600)   # 100ms @16k
+        self.assertEqual(len(out), 2400 * 2)            # 100ms @24k, int16
 
     def test_bias_prompt_combines_nickname_and_lexicon(self):
         from types import SimpleNamespace

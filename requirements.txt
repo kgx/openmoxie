@@ -13,3 +13,4 @@ qrcode
 Pillow
 unidecode
 deepmerge
+websocket-client
