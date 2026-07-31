@@ -148,6 +148,8 @@ class MemoryFragment(models.Model):
     # recently-surfaced memories lose salience instead of being repeated forever
     last_surfaced = models.DateTimeField(null=True, blank=True)
     surfaced_count = models.IntegerField(default=0)
+    # provenance: parent (seeded ground truth) | extracted (from conversation) | dream
+    origin = models.CharField(max_length=16, default='extracted')
     created = models.DateTimeField(auto_now_add=True)
     updated = models.DateTimeField(auto_now=True)
 

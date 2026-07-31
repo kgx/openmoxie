@@ -53,5 +53,5 @@ class Command(BaseCommand):
                 device_id = seed['device_id']
                 if not MoxieDevice.objects.filter(device_id=device_id).exists():
                     raise CommandError(f'Unknown device_id {device_id}')
-                result = apply_memory_ops(device_id, seed.get('ops', []))
+                result = apply_memory_ops(device_id, seed.get('ops', []), origin='parent')
                 self.stdout.write(f'{path}: fragments for {device_id}: {result}')

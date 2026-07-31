@@ -73,8 +73,8 @@ def duplicate_pairs(frags):
 def _listing_atomic(device_id):
     now = timezone.now()
     frags = list(MemoryFragment.objects.filter(device__device_id=device_id, active=True))
-    lines = [f'{f.bank} | {f.key} | conf={f.confidence:.2f} | {(now - f.updated).days}d old | {f.text}'
-             for f in frags]
+    lines = [f'{f.bank} | {f.key} | conf={f.confidence:.2f} | {(now - f.updated).days}d old | '
+             f'[{f.origin}] {f.text}' for f in frags]
     return frags, lines
 
 
@@ -128,7 +128,7 @@ def run_dream(device_id):
         return {'decayed': decayed, 'error': 'unparseable: ' + raw[:200]}
     ops = [op for op in ops if isinstance(op, dict) and op.get('bank') != 'objectives'] \
         if isinstance(ops, list) else []
-    result = apply_memory_ops(device_id, ops)
+    result = apply_memory_ops(device_id, ops, origin='dream')
     run_db_atomic(_prune_seeds_atomic, device_id)
     return {'decayed': decayed, 'dup_candidates': len(dups), **result}
 

@@ -889,6 +889,27 @@ class SessionPersistenceTests(TestCase):
         self.assertEqual(self.ChatSessionState.objects.first().session_id, 'B/y')
 
 
+class ProvenanceTests(TestCase):
+    def test_origin_recorded_and_shown_in_dream_listing(self):
+        from . import dream as dream_mod
+        MoxieDevice.objects.create(device_id='d_prov')
+        orig = memory_mod._embed_texts
+        memory_mod._embed_texts = lambda texts: None
+        try:
+            apply_memory_ops('d_prov', [{'op': 'add', 'bank': 'likes', 'key': 'seeded',
+                                         'text': 'parent fact'}], origin='parent')
+            apply_memory_ops('d_prov', [{'op': 'add', 'bank': 'likes', 'key': 'learned',
+                                         'text': 'child fact'}])
+        finally:
+            memory_mod._embed_texts = orig
+        self.assertEqual(MemoryFragment.objects.get(key='seeded').origin, 'parent')
+        self.assertEqual(MemoryFragment.objects.get(key='learned').origin, 'extracted')
+        _, lines = dream_mod._listing_atomic('d_prov')
+        joined = ' '.join(lines)
+        self.assertIn('[parent] parent fact', joined)
+        self.assertIn('[extracted] child fact', joined)
+
+
 class SttLexiconTests(TestCase):
     def test_lexicon_built_from_fragment_keys(self):
         MoxieDevice.objects.create(device_id='d_lex')

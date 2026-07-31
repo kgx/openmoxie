@@ -109,7 +109,7 @@ _STOP = set('the a an and or but so to of in on at for with is are was were be b
             'who how why not no yes have has had can could will would like about'.split())
 
 
-def _apply_ops_atomic(device_id, ops):
+def _apply_ops_atomic(device_id, ops, origin):
     device = MoxieDevice.objects.filter(device_id=device_id).first()
     if not device:
         return {'error': f'unknown device {device_id}'}, []
@@ -142,7 +142,8 @@ def _apply_ops_atomic(device_id, ops):
                 except (TypeError, ValueError):
                     conf = 0.5
                 frag = MemoryFragment.objects.create(device=device, bank=bank, key=key,
-                                                     text=str(op['text']), confidence=conf)
+                                                     text=str(op['text']), confidence=conf,
+                                                     origin=origin)
             changed.append((frag.pk, frag.text))
             applied += 1
         elif kind in ('retire', 'restore'):
@@ -166,9 +167,9 @@ def _store_embeddings_atomic(pk_vecs):
 # Invalid operations are skipped, never fatal. Returns {'applied': n, 'skipped': m}.
 # Changed fragments are (re-)embedded outside the transaction; embedding failure
 # degrades to lexical-only retrieval, never blocks the ops.
-def apply_memory_ops(device_id, ops):
+def apply_memory_ops(device_id, ops, origin='extracted'):
     try:
-        result, changed = run_db_atomic(_apply_ops_atomic, device_id, list(ops or []))
+        result, changed = run_db_atomic(_apply_ops_atomic, device_id, list(ops or []), origin)
         if changed:
             vecs = _embed_texts([text for _, text in changed])
             if vecs and len(vecs) == len(changed):
