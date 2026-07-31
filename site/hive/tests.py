@@ -663,6 +663,28 @@ class StandardHooksTests(TestCase):
         self.assertNotIn('<opener>', v2.response['output']['text'])
         self.assertIn('Hello, my friend', v2.response['output']['text'])
 
+    def test_opener_continues_instead_of_greeting_when_mid_conversation(self):
+        import time as _time
+        prompts = []
+        def summarize(prompt_base=None, max_tokens=None, model=None, append_transcript=None, **kw):
+            prompts.append(prompt_base or '')
+            return 'Anyway, back to our squishy creation!'
+        h = self.hooks.make_standard_hooks()
+        v = self.make_volley()
+        v.local_data['last_reply_ts'] = _time.time() - 30   # we were JUST talking
+        v.local_data['convo_summary'] = 'We were being silly about breakfast.'
+        v.set_output('<opener>', None)
+        h['post_process'](v, self.make_session(20, summarize))
+        self.assertIn('Do NOT greet', prompts[0])
+        self.assertIn('silly about breakfast', prompts[0])
+        self.assertEqual(v.response['output']['text'], 'Anyway, back to our squishy creation!')
+        # a genuinely fresh session (no recent reply) still gets a real greeting
+        prompts.clear()
+        v2 = self.make_volley()
+        v2.set_output('<opener>', None)
+        h['post_process'](v2, self.make_session(1, summarize))
+        self.assertNotIn('Do NOT greet', prompts[0])
+
     def test_post_process_checkpoint_consolidates_without_episode(self):
         def summarize(prompt_base=None, model=None, max_tokens=None, **kw):
             return json.dumps([]) if prompt_base else 'summary so far'

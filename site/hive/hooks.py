@@ -99,6 +99,9 @@ OPENER_STYLES = [
 
 
 # Replace the <opener> marker with a freshly generated, memory-aware greeting.
+CONTINUATION_WINDOW_SECS = 600
+
+
 def generate_opener(volley, session):
     import random
 
@@ -108,6 +111,18 @@ def generate_opener(volley, session):
     hour = timezone.localtime().hour
     part = 'morning' if hour < 12 else ('afternoon' if hour < 18 else 'evening')
     nick = (volley.config.get('child_pii') or {}).get('nickname') or 'your friend'
+    # module relaunches mid-play send a fresh 'prompt' - if we were just talking,
+    # CONTINUE the hangout instead of greeting like it is a brand new day
+    last = volley.local_data.get('last_reply_ts')
+    if last and time.time() - last < CONTINUATION_WINDOW_SECS:
+        summary = volley.local_data.get('convo_summary', '')
+        prompt = ('You are Moxie, a robot friend. You and ' + nick + ' are in the middle of '
+                  'hanging out - the chat is just resuming after a brief pause or game. Write ONE '
+                  'short, playful line (under 20 words) that smoothly continues the fun. Do NOT '
+                  'greet, do NOT say good ' + part + ', do NOT act like time has passed.'
+                  + ('\n\nWHAT YOU WERE TALKING ABOUT:\n' + summary if summary else ''))
+        opener = session.summarize(append_transcript=False, max_tokens=60, prompt_base=prompt)
+        return opener.strip().strip('"')
     style = random.choice(OPENER_STYLES)
     anchor = None
     if 'SPECIFIC MEMORY' in style:
@@ -148,6 +163,8 @@ def make_standard_hooks(min_volleys=4, checkpoint_volleys=40, guidance=''):
             volley.local_data['mem_ckpt'] = tv
             threading.Thread(target=consolidate, args=(volley, session, False, guidance),
                              daemon=True).start()
+        # stamp AFTER opener handling so the next relaunch can tell continuation from cold start
+        volley.local_data['last_reply_ts'] = time.time()
 
     return {'pre_process': pre_process, 'post_process': post_process,
             'complete_handler': complete_handler}
