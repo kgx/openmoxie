@@ -56,7 +56,7 @@ class InferenceTokenParamsTests(TestCase):
         self.assertEqual(inference_token_params('gpt-3.5-turbo', 70), {'max_tokens': 70})
 
     def test_gpt5_and_o_series_use_completion_tokens_without_reasoning(self):
-        for model in ('gpt-5.6-luna', 'gpt-5-mini', 'o3-mini'):
+        for model in ('gpt-5.6-luna', 'gpt-5-mini', 'gpt-6-luna', 'gpt-10-luna', 'o3-mini'):
             self.assertEqual(inference_token_params(model, 70),
                              {'max_completion_tokens': 70, 'reasoning_effort': 'none'})
 

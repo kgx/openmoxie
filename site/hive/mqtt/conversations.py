@@ -17,7 +17,8 @@ _DEFAULT_SUMMARY_PROMPT = "Summarize the following conversation between the frie
 
 # GPT-5 and later models reason by default (too slow for real-time chat) and reject max_tokens
 def inference_token_params(model, max_tokens):
-    if model.startswith('gpt-5') or model.startswith('o'):
+    gpt = re.match(r'gpt-(\d+)', model)
+    if (gpt and int(gpt.group(1)) >= 5) or model.startswith('o'):
         return { 'max_completion_tokens': max_tokens, 'reasoning_effort': 'none' }
     return { 'max_tokens': max_tokens }
 
